@@ -1,4 +1,4 @@
-use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight, AnalyticsEngine, ConversationAnalytics};
+use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight, AnalyticsEngine, ConversationAnalytics, ConversationExporter, ExportConfig, ExportFormat};
 use crate::errors::ClaudeToolsError;
 use crate::ui::conversation_display::ConversationRenderer;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -21,6 +21,8 @@ pub enum AppState {
     Search,
     /// Analytics dashboard
     Analytics,
+    /// Export mode
+    Export,
     /// Help overlay
     Help,
     /// Quitting application
@@ -69,6 +71,10 @@ pub struct App {
     analytics_data: Option<ConversationAnalytics>,
     /// Analytics scroll position
     analytics_scroll: usize,
+    /// Export format selection
+    export_format_index: usize,
+    /// Available export formats
+    export_formats: Vec<ExportFormat>,
 }
 
 impl App {
@@ -106,6 +112,13 @@ impl App {
             analytics_engine: None,
             analytics_data: None,
             analytics_scroll: 0,
+            export_format_index: 0,
+            export_formats: vec![
+                ExportFormat::Markdown,
+                ExportFormat::Html,
+                ExportFormat::Json,
+                ExportFormat::Pdf,
+            ],
         })
     }
 
@@ -116,6 +129,7 @@ impl App {
             AppState::ConversationDetail => self.handle_detail_key_event(key),
             AppState::Search => self.handle_search_key_event(key),
             AppState::Analytics => self.handle_analytics_key_event(key),
+            AppState::Export => self.handle_export_key_event(key),
             AppState::Help => self.handle_help_key_event(key),
             AppState::Quitting => {}
         }
@@ -205,6 +219,9 @@ impl App {
             KeyCode::PageUp => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(10);
             }
+            KeyCode::Char('e') => {
+                self.start_export();
+            }
             _ => {}
         }
     }
@@ -260,6 +277,38 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_analytics();
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle key events in export mode
+    fn handle_export_key_event(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.state = AppState::ConversationDetail;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.export_format_index < self.export_formats.len() - 1 {
+                    self.export_format_index += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.export_format_index > 0 {
+                    self.export_format_index -= 1;
+                }
+            }
+            KeyCode::Enter => {
+                // Check if format is available
+                let format = &self.export_formats[self.export_format_index];
+                let available = !matches!(format, ExportFormat::Pdf);
+                
+                if available {
+                    self.execute_export();
+                } else {
+                    self.error_message = Some("PDF export requires external tools. Use HTML export and convert manually.".to_string());
+                    self.state = AppState::ConversationDetail;
+                }
             }
             _ => {}
         }
@@ -495,6 +544,10 @@ impl App {
             AppState::Analytics => {
                 self.render_analytics_dashboard(frame, chunks[0]);
             }
+            AppState::Export => {
+                self.render_conversation_detail(frame, chunks[0]);
+                self.render_export_overlay(frame, frame.area());
+            }
             AppState::Help => {
                 self.render_conversation_list(frame, chunks[0]);
                 self.render_help_overlay(frame, frame.area());
@@ -581,6 +634,7 @@ impl App {
                     Line::from(""),
                     Line::from("🔧 Actions:"),
                     Line::from("  q / Esc    Return to conversation list"),
+                    Line::from("  e          Export conversation to file"),
                     Line::from("  /          Search within conversation"),
                 ]);
                 
@@ -654,6 +708,32 @@ impl App {
                     Line::from("  e          Export analytics to JSON file"),
                     Line::from("  r          Refresh analytics data"),
                     Line::from("  q / Esc    Return to conversation list"),
+                ]);
+            },
+
+            AppState::Export => {
+                help_text.push(Line::from(vec![
+                    Span::styled("📤 ".to_string(), Style::default().fg(Color::Magenta)),
+                    Span::styled("EXPORT MODE".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                ]));
+                help_text.push(Line::from(""));
+                
+                help_text.extend(vec![
+                    Line::from("📍 Format Selection:"),
+                    Line::from("  j / ↓      Move down format list"),
+                    Line::from("  k / ↑      Move up format list"),
+                    Line::from(""),
+                    Line::from("🔧 Actions:"),
+                    Line::from("  Enter      Export conversation in selected format"),
+                    Line::from("  q / Esc    Cancel export and return"),
+                    Line::from(""),
+                    Line::from("📋 Available Formats:"),
+                    Line::from("  Markdown   - .md file with formatting"),
+                    Line::from("  HTML       - .html file with styling"),
+                    Line::from("  JSON       - .json file for processing"),
+                    Line::from("  PDF        - .pdf file (external tool required)"),
+                    Line::from(""),
+                    Line::from("📝 Export includes metadata, timestamps, and tool usage"),
                 ]);
             },
             
@@ -806,6 +886,7 @@ impl App {
             AppState::ConversationDetail => "Help - Conversation Detail",
             AppState::Search => "Help - Search Mode",
             AppState::Analytics => "Help - Analytics Dashboard",
+            AppState::Export => "Help - Export Mode",
             AppState::Help => "Help - Interactive Guide",
             AppState::Quitting => "Help",
         };
@@ -824,13 +905,94 @@ impl App {
         frame.render_widget(paragraph, popup_area);
     }
 
+    /// Render export overlay
+    fn render_export_overlay(&mut self, frame: &mut Frame, area: Rect) {
+        let mut export_text = Vec::new();
+        
+        // Header
+        export_text.push(Line::from(vec![
+            Span::styled("📤 ", Style::default().fg(Color::Magenta)),
+            Span::styled("Export Conversation", 
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        ]));
+        export_text.push(Line::from(""));
+        
+        if let Some(ref conversation) = self.selected_conversation {
+            export_text.push(Line::from(vec![
+                Span::styled("Conversation: ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{} ({} messages)", 
+                        conversation.session_id.chars().take(12).collect::<String>(),
+                        conversation.messages.len()
+                    ),
+                    Style::default().fg(Color::Cyan)
+                ),
+            ]));
+            export_text.push(Line::from(""));
+        }
+        
+        export_text.push(Line::from("Select export format:"));
+        export_text.push(Line::from(""));
+        
+        // Format options
+        for (i, format) in self.export_formats.iter().enumerate() {
+            let (name, description, available) = match format {
+                ExportFormat::Markdown => ("Markdown", "Human-readable text with formatting", true),
+                ExportFormat::Html => ("HTML", "Web page with styling and syntax highlighting", true),
+                ExportFormat::Json => ("JSON", "Structured data for programmatic processing", true),
+                ExportFormat::Pdf => ("PDF", "Print-ready document (external tool required)", false),
+            };
+            
+            let style = if i == self.export_format_index {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED)
+            } else if available {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            
+            let prefix = if i == self.export_format_index { "► " } else { "  " };
+            let status = if available { "" } else { " (Not Available)" };
+            
+            export_text.push(Line::from(vec![
+                Span::styled(format!("{}{}", prefix, name), style),
+                Span::styled(status, Style::default().fg(Color::Red)),
+            ]));
+            export_text.push(Line::from(vec![
+                Span::styled(format!("    {}", description), Style::default().fg(Color::DarkGray)),
+            ]));
+            export_text.push(Line::from(""));
+        }
+        
+        // Instructions
+        export_text.push(Line::from(""));
+        export_text.push(Line::from(vec![
+            Span::styled("Controls: ", Style::default().fg(Color::Blue)),
+            Span::styled("j/k = navigate, Enter = export, q = cancel", Style::default().fg(Color::DarkGray)),
+        ]));
+        
+        let block = Block::default()
+            .title("Export Conversation")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Magenta));
+
+        let paragraph = Paragraph::new(export_text)
+            .block(block)
+            .wrap(Wrap { trim: true });
+
+        let popup_area = centered_rect(60, 70, area);
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(paragraph, popup_area);
+    }
+
     /// Render status bar
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect) {
         let mut status_text = match self.state {
             AppState::ConversationList => "Press ? for help, / to search, a for analytics, q to quit".to_string(),
-            AppState::ConversationDetail => "Press q to go back, j/k to scroll".to_string(),
+            AppState::ConversationDetail => "Press q to go back, j/k to scroll, e to export".to_string(),
             AppState::Search => format!("Search: {}_", self.search_query),
             AppState::Analytics => "Press j/k to scroll, e to export, r to refresh, q to go back".to_string(),
+            AppState::Export => "Select format with j/k, Enter to export, q to cancel".to_string(),
             AppState::Help => "Press any key to close help".to_string(),
             AppState::Quitting => "Goodbye!".to_string(),
         };
@@ -941,6 +1103,61 @@ impl App {
             }
         } else {
             self.error_message = Some("No analytics data to export".to_string());
+        }
+    }
+
+    /// Start export mode
+    fn start_export(&mut self) {
+        if self.selected_conversation.is_some() {
+            self.state = AppState::Export;
+            self.export_format_index = 0;
+        } else {
+            self.error_message = Some("No conversation selected for export".to_string());
+        }
+    }
+
+    /// Execute export with selected format
+    fn execute_export(&mut self) {
+        if let Some(ref conversation) = self.selected_conversation {
+            let format = &self.export_formats[self.export_format_index];
+            
+            // Generate filename
+            let extension = match format {
+                ExportFormat::Markdown => "md",
+                ExportFormat::Html => "html",
+                ExportFormat::Json => "json",
+                ExportFormat::Pdf => "pdf",
+            };
+            let filename = format!("conversation_{}.{}", &conversation.session_id[..8], extension);
+            
+            // Create export config
+            let config = ExportConfig {
+                output_path: std::path::PathBuf::from(&filename),
+                format: format.clone(),
+                include_metadata: true,
+                include_tool_usage: true,
+                include_timestamps: true,
+                template_path: None,
+                title: Some(format!("Conversation: {}", conversation.session_id)),
+            };
+
+            // Create exporter and export
+            let exporter = ConversationExporter::new(config);
+            match exporter.export_conversation(conversation) {
+                Ok(result) => {
+                    self.status_message = Some(format!(
+                        "Exported to {} ({} bytes, {} messages)", 
+                        result.file_path.display(),
+                        result.file_size,
+                        result.message_count
+                    ));
+                    self.state = AppState::ConversationDetail;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Export failed: {}", e));
+                    self.state = AppState::ConversationDetail;
+                }
+            }
         }
     }
 

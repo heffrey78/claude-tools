@@ -14,6 +14,7 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 - **Detail View**: Full conversation display with markdown rendering and syntax highlighting
 - **Advanced Search**: TF-IDF ranking, regex support, visual highlighting, navigation (n/N)
 - **Analytics Dashboard**: Comprehensive statistics and insights (press 'a')
+- **Export Functionality**: Export conversations directly from UI (press 'e' in detail view)
 - **Help System**: Built-in help overlay with all keyboard shortcuts
 
 ### 🔍 Advanced Search Features
@@ -36,6 +37,7 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 ### 📊 Command Line Interface
 - **List Conversations**: View all conversations with optional detailed view
 - **Show Conversations**: Display full conversation content in multiple formats
+- **Export Conversations**: Export to Markdown, HTML, JSON formats with full metadata
 - **Search Content**: Find conversations by content with match highlighting
 - **Statistics**: Comprehensive analytics with export capabilities (JSON/CSV)
 
@@ -53,6 +55,7 @@ cargo run -- interactive
 cargo run -- list --detailed
 cargo run -- search "claude code"
 cargo run -- show <conversation-id>
+cargo run -- show <id> --export markdown --include-metadata --include-tools
 cargo run -- stats --detailed
 cargo run -- stats --export json  # Export analytics data
 ```
@@ -79,7 +82,7 @@ cargo run -- stats --export json  # Export analytics data
 - ✅ Visual search highlighting and navigation
 - ✅ Markdown rendering with syntax highlighting
 - ✅ Conversation statistics and analytics
-- 🔲 Export to multiple formats (markdown, PDF, HTML)
+- ✅ Export to multiple formats (markdown, HTML, JSON) with CLI and interactive UI
 - 🔲 Conversation tagging and organization
 
 ### Phase 3: MCP Server Management (Planned)

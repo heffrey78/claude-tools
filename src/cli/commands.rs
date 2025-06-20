@@ -1,6 +1,6 @@
 use crate::claude::conversation::MessageRole as ConvMessageRole;
-use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine};
-use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat};
+use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine, ConversationExporter, ExportConfig};
+use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat, ConversationExportFormat};
 use crate::errors::Result;
 use crate::ui::{App, Event, EventHandler};
 use crossterm::{
@@ -8,7 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{io, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 pub fn execute_command(
     claude_dir: ClaudeDirectory,
@@ -25,7 +25,12 @@ pub fn execute_command(
             conversation_id,
             format,
             role,
-        } => execute_show(claude_dir, conversation_id, format, role, verbose),
+            export,
+            output,
+            include_metadata,
+            include_tools,
+            include_timestamps,
+        } => execute_show(claude_dir, conversation_id, format, role, export, output, include_metadata, include_tools, include_timestamps, verbose),
         Commands::Search {
             query,
             regex,
@@ -105,6 +110,11 @@ fn execute_show(
     conversation_id: String,
     format: OutputFormat,
     role: Option<MessageRole>,
+    export: Option<ConversationExportFormat>,
+    output: Option<String>,
+    include_metadata: bool,
+    include_tools: bool,
+    include_timestamps: bool,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -115,6 +125,20 @@ fn execute_show(
 
     match parser.get_conversation(&conversation_id)? {
         Some(conversation) => {
+            // Handle export functionality first
+            if let Some(export_format) = export {
+                return handle_conversation_export(
+                    &conversation, 
+                    export_format, 
+                    output, 
+                    include_metadata, 
+                    include_tools, 
+                    include_timestamps, 
+                    verbose
+                );
+            }
+
+            // Handle regular display formats
             match format {
                 OutputFormat::Human => {
                     println!("📄 Conversation: {}", conversation.session_id);
@@ -553,4 +577,71 @@ fn run_app<B: ratatui::backend::Backend>(
         }
     }
     Ok(())
+}
+
+/// Handle conversation export functionality
+fn handle_conversation_export(
+    conversation: &crate::claude::Conversation,
+    export_format: ConversationExportFormat,
+    output: Option<String>,
+    include_metadata: bool,
+    include_tools: bool,
+    include_timestamps: bool,
+    verbose: bool,
+) -> Result<()> {
+    // Convert CLI export format to internal format
+    let internal_format = match export_format {
+        ConversationExportFormat::Markdown => crate::claude::export::ExportFormat::Markdown,
+        ConversationExportFormat::Html => crate::claude::export::ExportFormat::Html,
+        ConversationExportFormat::Pdf => crate::claude::export::ExportFormat::Pdf,
+        ConversationExportFormat::Json => crate::claude::export::ExportFormat::Json,
+    };
+
+    // Determine output path
+    let output_path = match output {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let extension = match export_format {
+                ConversationExportFormat::Markdown => "md",
+                ConversationExportFormat::Html => "html", 
+                ConversationExportFormat::Pdf => "pdf",
+                ConversationExportFormat::Json => "json",
+            };
+            PathBuf::from(format!("conversation_{}.{}", &conversation.session_id[..8], extension))
+        }
+    };
+
+    // Create export configuration
+    let config = ExportConfig {
+        output_path: output_path.clone(),
+        format: internal_format,
+        include_metadata,
+        include_tool_usage: include_tools,
+        include_timestamps,
+        template_path: None,
+        title: Some(format!("Conversation: {}", conversation.session_id)),
+    };
+
+    if verbose {
+        eprintln!("Exporting conversation to: {}", output_path.display());
+    }
+
+    // Create exporter and export
+    let exporter = ConversationExporter::new(config);
+    match exporter.export_conversation(conversation) {
+        Ok(result) => {
+            println!("📄 Conversation exported successfully!");
+            println!("   File: {}", result.file_path.display());
+            println!("   Size: {} bytes", result.file_size);
+            println!("   Messages: {}", result.message_count);
+            if verbose {
+                println!("   Export time: {}ms", result.duration_ms);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("❌ Export failed: {}", e);
+            Err(e)
+        }
+    }
 }

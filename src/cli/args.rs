@@ -86,6 +86,7 @@ EXAMPLES:
     claude-tools show abc --format json        # Raw JSON output for scripting
     claude-tools show abc --role user          # Show only user messages
     claude-tools show abc --role assistant     # Show only assistant responses
+    claude-tools show abc --export markdown --output conversation.md  # Export to file
 
 The conversation ID can be a full ID or a unique prefix. Use 'list' command to find IDs."
     )]
@@ -101,6 +102,26 @@ The conversation ID can be a full ID or a unique prefix. Use 'list' command to f
         /// Show only messages from this role (user, assistant, system, tool)
         #[arg(long, value_enum)]
         role: Option<MessageRole>,
+
+        /// Export format (when saving to file)
+        #[arg(long, value_enum)]
+        export: Option<ConversationExportFormat>,
+
+        /// Output file path (use with --export)
+        #[arg(long, value_name = "FILE")]
+        output: Option<String>,
+
+        /// Include metadata in export
+        #[arg(long)]
+        include_metadata: bool,
+
+        /// Include tool usage information
+        #[arg(long)]
+        include_tools: bool,
+
+        /// Include timestamps
+        #[arg(long)]
+        include_timestamps: bool,
     },
 
     /// Search conversations
@@ -221,5 +242,17 @@ pub enum ExportFormat {
     /// CSV format for spreadsheet analysis
     Csv,
     /// JSON format for programmatic analysis
+    Json,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum ConversationExportFormat {
+    /// Markdown format for documentation and sharing
+    Markdown,
+    /// HTML format with styling for web viewing
+    Html,
+    /// PDF format for printing and archiving
+    Pdf,
+    /// JSON format for programmatic processing
     Json,
 }
