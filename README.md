@@ -13,6 +13,7 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 - **Conversation Browser**: Scrollable list with summaries and metadata
 - **Detail View**: Full conversation display with markdown rendering and syntax highlighting
 - **Advanced Search**: TF-IDF ranking, regex support, visual highlighting, navigation (n/N)
+- **Analytics Dashboard**: Comprehensive statistics and insights (press 'a')
 - **Help System**: Built-in help overlay with all keyboard shortcuts
 
 ### 🔍 Advanced Search Features
@@ -23,11 +24,20 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 - **Smart Ranking**: TF-IDF scoring with recency boost and length normalization
 - **Filtering**: Date range and project filtering capabilities
 
+### 📊 Analytics and Insights
+- **Comprehensive Metrics**: 6 analytics categories covering all conversation aspects
+- **Temporal Analysis**: Peak usage hours, weekday patterns, activity trends
+- **Model & Tool Usage**: Track which models and tools you use most
+- **Project Analytics**: Understand conversation distribution across projects
+- **Quality Metrics**: Average duration, completion rates, message length stats
+- **Export Capabilities**: Export analytics to JSON or CSV for external analysis
+- **Interactive Dashboard**: Terminal UI analytics view with scrolling and navigation
+
 ### 📊 Command Line Interface
 - **List Conversations**: View all conversations with optional detailed view
 - **Show Conversations**: Display full conversation content in multiple formats
 - **Search Content**: Find conversations by content with match highlighting
-- **Statistics**: Comprehensive stats about your conversation history
+- **Statistics**: Comprehensive analytics with export capabilities (JSON/CSV)
 
 ### 🚀 Quick Start
 ```bash
@@ -43,7 +53,8 @@ cargo run -- interactive
 cargo run -- list --detailed
 cargo run -- search "claude code"
 cargo run -- show <conversation-id>
-cargo run -- stats
+cargo run -- stats --detailed
+cargo run -- stats --export json  # Export analytics data
 ```
 
 ### 📈 Performance
@@ -67,7 +78,7 @@ cargo run -- stats
 - ✅ Advanced search with TF-IDF ranking and regex support
 - ✅ Visual search highlighting and navigation
 - ✅ Markdown rendering with syntax highlighting
-- 🔲 Conversation statistics and analytics
+- ✅ Conversation statistics and analytics
 - 🔲 Export to multiple formats (markdown, PDF, HTML)
 - 🔲 Conversation tagging and organization
 

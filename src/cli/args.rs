@@ -157,6 +157,14 @@ distribution, and temporal activity patterns."
         /// Show comprehensive global statistics and analytics
         #[arg(long)]
         global: bool,
+
+        /// Export analytics data to file (csv, json)
+        #[arg(long, value_enum)]
+        export: Option<ExportFormat>,
+
+        /// Show detailed analytics dashboard
+        #[arg(long)]
+        detailed: bool,
     },
 
     /// Interactive browse mode
@@ -206,4 +214,12 @@ pub enum MessageRole {
     System,
     /// Tool execution results and calls
     Tool,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+pub enum ExportFormat {
+    /// CSV format for spreadsheet analysis
+    Csv,
+    /// JSON format for programmatic analysis
+    Json,
 }

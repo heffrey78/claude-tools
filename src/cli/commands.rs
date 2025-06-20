@@ -1,6 +1,6 @@
 use crate::claude::conversation::MessageRole as ConvMessageRole;
-use crate::claude::{ClaudeDirectory, ConversationParser};
-use crate::cli::args::{Commands, MessageRole, OutputFormat};
+use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine};
+use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat};
 use crate::errors::Result;
 use crate::ui::{App, Event, EventHandler};
 use crossterm::{
@@ -35,7 +35,9 @@ pub fn execute_command(
         Commands::Stats {
             conversation_id,
             global,
-        } => execute_stats(claude_dir, conversation_id, global, verbose),
+            export,
+            detailed,
+        } => execute_stats(claude_dir, conversation_id, global, export, detailed, verbose),
         Commands::Interactive => execute_interactive(claude_dir, verbose),
     }
 }
@@ -255,21 +257,23 @@ fn execute_search(
 fn execute_stats(
     claude_dir: ClaudeDirectory,
     conversation_id: Option<String>,
-    _global: bool,
+    global: bool,
+    export: Option<ExportFormat>,
+    detailed: bool,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
         if let Some(id) = &conversation_id {
             eprintln!("Getting stats for conversation: {}", id);
         } else {
-            eprintln!("Getting global statistics");
+            eprintln!("Generating comprehensive analytics...");
         }
     }
 
     let parser = ConversationParser::new(claude_dir);
 
     if let Some(id) = conversation_id {
-        // Stats for specific conversation
+        // Stats for specific conversation (existing implementation)
         match parser.get_conversation(&id)? {
             Some(conv) => {
                 println!("📊 Conversation Statistics");
@@ -295,26 +299,195 @@ fn execute_stats(
             }
         }
     } else {
-        // Global stats
-        let stats = parser.get_stats()?;
+        // Global analytics with new engine
+        let conversations = parser.parse_all_conversations()?;
+        let mut analytics_engine = AnalyticsEngine::new(conversations);
+        let analytics = analytics_engine.generate_analytics()?;
 
-        println!("📊 Global Statistics");
-        println!("   Total conversations: {}", stats.total_conversations);
-        println!("   Total messages: {}", stats.total_messages);
-        println!("   User messages: {}", stats.total_user_messages);
-        println!("   Assistant messages: {}", stats.total_assistant_messages);
-        println!();
-        println!("📁 Projects:");
+        // Handle export first if requested
+        if let Some(export_format) = export {
+            return handle_export(analytics, export_format, verbose);
+        }
 
-        let mut projects: Vec<_> = stats.projects.iter().collect();
-        projects.sort_by(|a, b| b.1.cmp(a.1)); // Sort by count descending
-
-        for (project, count) in projects {
-            println!("   {} - {} conversation(s)", project, count);
+        // Display analytics based on detail level
+        if detailed || global {
+            display_detailed_analytics(analytics);
+        } else {
+            display_basic_analytics(analytics);
         }
     }
 
     Ok(())
+}
+
+/// Display basic analytics summary
+fn display_basic_analytics(analytics: &crate::claude::ConversationAnalytics) {
+    let stats = &analytics.basic_stats;
+    
+    println!("📊 Conversation Analytics Summary");
+    println!();
+    println!("📈 Basic Statistics:");
+    println!("   Total conversations: {}", stats.total_conversations);
+    println!("   Total messages: {}", stats.total_messages);
+    println!("   User messages: {}", stats.total_user_messages);
+    println!("   Assistant messages: {}", stats.total_assistant_messages);
+    println!("   System messages: {}", stats.total_system_messages);
+    println!("   Tool uses: {}", stats.total_tool_uses);
+    println!("   Avg. messages per conversation: {:.1}", stats.average_messages_per_conversation);
+    
+    if let Some(date_range) = &stats.date_range.earliest {
+        println!("   First conversation: {}", date_range.format("%Y-%m-%d"));
+    }
+    if let Some(date_range) = &stats.date_range.latest {
+        println!("   Latest conversation: {}", date_range.format("%Y-%m-%d"));
+    }
+    if let Some(span) = stats.date_range.span_days {
+        println!("   Activity span: {} days", span);
+    }
+
+    println!();
+    println!("🏆 Top Models:");
+    for (i, model) in analytics.model_analytics.top_models.iter().take(5).enumerate() {
+        println!("   {}. {} - {} uses ({:.1}%)", 
+            i + 1, model.model_name, model.usage_count, model.percentage);
+    }
+
+    println!();
+    println!("🛠️  Top Tools:");
+    for (i, tool) in analytics.tool_analytics.top_tools.iter().take(5).enumerate() {
+        println!("   {}. {} - {} uses ({:.1}%)", 
+            i + 1, tool.tool_name, tool.usage_count, tool.percentage);
+    }
+
+    println!();
+    println!("📁 Top Projects:");
+    for (i, project) in analytics.project_analytics.top_projects.iter().take(5).enumerate() {
+        println!("   {}. {} - {} conversations ({:.1}%)", 
+            i + 1, project.project_name, project.conversation_count, project.percentage);
+    }
+
+    println!();
+    println!("💡 Use --detailed for comprehensive analytics or --export json/csv for data export");
+}
+
+/// Display detailed analytics dashboard
+fn display_detailed_analytics(analytics: &crate::claude::ConversationAnalytics) {
+    display_basic_analytics(analytics);
+    
+    println!();
+    println!("🕒 Temporal Analysis:");
+    
+    // Peak usage hours
+    println!("   Peak usage hours:");
+    for peak in &analytics.temporal_analysis.peak_usage_hours {
+        println!("     {}:00 - {} conversations ({:.1}%)", 
+            peak.hour, peak.count, peak.percentage);
+    }
+    
+    // Weekday usage
+    let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    println!("   Usage by day of week:");
+    for (day_num, count) in &analytics.temporal_analysis.usage_by_weekday {
+        if let Some(day_name) = weekdays.get(*day_num as usize) {
+            println!("     {} - {} conversations", day_name, count);
+        }
+    }
+
+    println!();
+    println!("📊 Quality Metrics:");
+    let quality = &analytics.quality_metrics;
+    if let Some(avg_duration) = quality.average_conversation_duration {
+        println!("   Average conversation duration: {:.1} minutes", avg_duration);
+    }
+    println!("   Average turns per conversation: {:.1}", quality.average_turns_per_conversation);
+    println!("   Completion rate: {:.1}%", quality.completion_rate);
+    
+    let msg_dist = &quality.message_length_distribution;
+    println!("   Message length stats:");
+    println!("     Average: {:.0} characters", msg_dist.mean);
+    println!("     Median: {} characters", msg_dist.median);
+    println!("     95th percentile: {} characters", msg_dist.percentile_95);
+
+    println!();
+    println!("📈 Conversation Length Distribution:");
+    let conv_dist = &analytics.basic_stats.conversation_length_distribution;
+    println!("   Shortest: {} messages", conv_dist.min);
+    println!("   Longest: {} messages", conv_dist.max);
+    println!("   Average: {:.1} messages", conv_dist.mean);
+    println!("   Median: {} messages", conv_dist.median);
+    println!("   95th percentile: {} messages", conv_dist.percentile_95);
+}
+
+/// Handle analytics export
+fn handle_export(
+    analytics: &crate::claude::ConversationAnalytics, 
+    format: ExportFormat, 
+    verbose: bool
+) -> Result<()> {
+    let timestamp = analytics.generated_at.format("%Y%m%d_%H%M%S");
+    
+    match format {
+        ExportFormat::Json => {
+            let filename = format!("claude_analytics_{}.json", timestamp);
+            let json_data = serde_json::to_string_pretty(analytics)?;
+            let data_size = json_data.len();
+            std::fs::write(&filename, json_data)?;
+            println!("📄 Analytics exported to: {}", filename);
+            if verbose {
+                println!("   Format: JSON");
+                println!("   Size: {} bytes", data_size);
+            }
+        },
+        ExportFormat::Csv => {
+            let filename = format!("claude_analytics_{}.csv", timestamp);
+            let csv_data = generate_csv_export(analytics)?;
+            let row_count = csv_data.lines().count();
+            std::fs::write(&filename, csv_data)?;
+            println!("📄 Analytics exported to: {}", filename);
+            if verbose {
+                println!("   Format: CSV");
+                println!("   Rows: {}", row_count);
+            }
+        },
+    }
+    
+    Ok(())
+}
+
+/// Generate CSV export of analytics data
+fn generate_csv_export(analytics: &crate::claude::ConversationAnalytics) -> Result<String> {
+    let mut csv_content = String::new();
+    
+    // Basic stats section
+    csv_content.push_str("Section,Metric,Value\n");
+    csv_content.push_str(&format!("Basic,Total Conversations,{}\n", analytics.basic_stats.total_conversations));
+    csv_content.push_str(&format!("Basic,Total Messages,{}\n", analytics.basic_stats.total_messages));
+    csv_content.push_str(&format!("Basic,User Messages,{}\n", analytics.basic_stats.total_user_messages));
+    csv_content.push_str(&format!("Basic,Assistant Messages,{}\n", analytics.basic_stats.total_assistant_messages));
+    csv_content.push_str(&format!("Basic,System Messages,{}\n", analytics.basic_stats.total_system_messages));
+    csv_content.push_str(&format!("Basic,Tool Uses,{}\n", analytics.basic_stats.total_tool_uses));
+    csv_content.push_str(&format!("Basic,Avg Messages per Conversation,{:.2}\n", analytics.basic_stats.average_messages_per_conversation));
+    
+    // Model usage
+    csv_content.push_str("\nModel,Usage Count,Percentage\n");
+    for model in &analytics.model_analytics.top_models {
+        csv_content.push_str(&format!("{},{},{:.2}\n", model.model_name, model.usage_count, model.percentage));
+    }
+    
+    // Tool usage
+    csv_content.push_str("\nTool,Usage Count,Percentage\n");
+    for tool in &analytics.tool_analytics.top_tools {
+        csv_content.push_str(&format!("{},{},{:.2}\n", tool.tool_name, tool.usage_count, tool.percentage));
+    }
+    
+    // Project usage
+    csv_content.push_str("\nProject,Conversations,Messages,Percentage\n");
+    for project in &analytics.project_analytics.top_projects {
+        csv_content.push_str(&format!("{},{},{},{:.2}\n", 
+            project.project_name, project.conversation_count, project.message_count, project.percentage));
+    }
+    
+    Ok(csv_content)
 }
 
 fn execute_interactive(claude_dir: ClaudeDirectory, verbose: bool) -> Result<()> {

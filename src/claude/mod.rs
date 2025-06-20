@@ -1,9 +1,11 @@
+pub mod analytics;
 pub mod conversation;
 pub mod directory;
 pub mod parser;
 pub mod search;
 pub mod streaming;
 
+pub use analytics::{AnalyticsEngine, ConversationAnalytics, BasicStats, TemporalAnalysis, ModelAnalytics, ToolAnalytics, ProjectAnalytics, QualityMetrics};
 pub use conversation::{Conversation, ConversationEntry, ConversationMessage};
 pub use directory::ClaudeDirectory;
 pub use parser::{ConversationParser, ConversationStats};

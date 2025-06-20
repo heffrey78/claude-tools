@@ -1,4 +1,4 @@
-use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight};
+use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight, AnalyticsEngine, ConversationAnalytics};
 use crate::errors::ClaudeToolsError;
 use crate::ui::conversation_display::ConversationRenderer;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -19,6 +19,8 @@ pub enum AppState {
     ConversationDetail,
     /// Search mode
     Search,
+    /// Analytics dashboard
+    Analytics,
     /// Help overlay
     Help,
     /// Quitting application
@@ -61,6 +63,12 @@ pub struct App {
     current_search_result_index: usize,
     /// Search navigation active
     search_navigation_active: bool,
+    /// Analytics engine
+    analytics_engine: Option<AnalyticsEngine>,
+    /// Cached analytics data
+    analytics_data: Option<ConversationAnalytics>,
+    /// Analytics scroll position
+    analytics_scroll: usize,
 }
 
 impl App {
@@ -95,6 +103,9 @@ impl App {
             current_search_mode: SearchMode::Text,
             current_search_result_index: 0,
             search_navigation_active: false,
+            analytics_engine: None,
+            analytics_data: None,
+            analytics_scroll: 0,
         })
     }
 
@@ -104,6 +115,7 @@ impl App {
             AppState::ConversationList => self.handle_list_key_event(key),
             AppState::ConversationDetail => self.handle_detail_key_event(key),
             AppState::Search => self.handle_search_key_event(key),
+            AppState::Analytics => self.handle_analytics_key_event(key),
             AppState::Help => self.handle_help_key_event(key),
             AppState::Quitting => {}
         }
@@ -149,6 +161,9 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_conversations();
+            }
+            KeyCode::Char('a') => {
+                self.start_analytics();
             }
             _ => {}
         }
@@ -210,6 +225,41 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.search_query.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle key events in analytics mode
+    fn handle_analytics_key_event(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.state = AppState::ConversationList;
+                self.analytics_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.analytics_scroll = self.analytics_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.analytics_scroll = self.analytics_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                self.analytics_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                self.analytics_scroll = 100; // Max scroll, will be clamped by render
+            }
+            KeyCode::PageDown => {
+                self.analytics_scroll = self.analytics_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                self.analytics_scroll = self.analytics_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('e') => {
+                self.export_analytics();
+            }
+            KeyCode::Char('r') => {
+                self.refresh_analytics();
             }
             _ => {}
         }
@@ -442,6 +492,9 @@ impl App {
             AppState::ConversationDetail => {
                 self.render_conversation_detail(frame, chunks[0]);
             }
+            AppState::Analytics => {
+                self.render_analytics_dashboard(frame, chunks[0]);
+            }
             AppState::Help => {
                 self.render_conversation_list(frame, chunks[0]);
                 self.render_help_overlay(frame, frame.area());
@@ -579,6 +632,29 @@ impl App {
                         Span::styled(self.search_query.clone(), Style::default().fg(Color::White).add_modifier(Modifier::ITALIC)),
                     ]));
                 }
+            },
+            
+            AppState::Analytics => {
+                help_text.push(Line::from(vec![
+                    Span::styled("📊 ".to_string(), Style::default().fg(Color::Blue)),
+                    Span::styled("ANALYTICS DASHBOARD MODE".to_string(), Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]));
+                help_text.push(Line::from(""));
+                
+                help_text.extend(vec![
+                    Line::from("📍 Navigation:"),
+                    Line::from("  j / ↓      Scroll down through analytics"),
+                    Line::from("  k / ↑      Scroll up through analytics"),
+                    Line::from("  g          Jump to top of analytics"),
+                    Line::from("  G          Jump to bottom of analytics"),
+                    Line::from("  PgDn       Page down (fast scroll)"),
+                    Line::from("  PgUp       Page up (fast scroll)"),
+                    Line::from(""),
+                    Line::from("🔧 Actions:"),
+                    Line::from("  e          Export analytics to JSON file"),
+                    Line::from("  r          Refresh analytics data"),
+                    Line::from("  q / Esc    Return to conversation list"),
+                ]);
             },
             
             AppState::Help => {
@@ -729,6 +805,7 @@ impl App {
             AppState::ConversationList => "Help - Conversation List",
             AppState::ConversationDetail => "Help - Conversation Detail",
             AppState::Search => "Help - Search Mode",
+            AppState::Analytics => "Help - Analytics Dashboard",
             AppState::Help => "Help - Interactive Guide",
             AppState::Quitting => "Help",
         };
@@ -750,9 +827,10 @@ impl App {
     /// Render status bar
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect) {
         let mut status_text = match self.state {
-            AppState::ConversationList => "Press ? for help, / to search, q to quit".to_string(),
+            AppState::ConversationList => "Press ? for help, / to search, a for analytics, q to quit".to_string(),
             AppState::ConversationDetail => "Press q to go back, j/k to scroll".to_string(),
             AppState::Search => format!("Search: {}_", self.search_query),
+            AppState::Analytics => "Press j/k to scroll, e to export, r to refresh, q to go back".to_string(),
             AppState::Help => "Press any key to close help".to_string(),
             AppState::Quitting => "Goodbye!".to_string(),
         };
@@ -798,6 +876,238 @@ impl App {
             Paragraph::new(search_text).style(Style::default().fg(Color::Yellow));
 
         frame.render_widget(search_paragraph, search_area);
+    }
+
+    /// Start analytics mode
+    fn start_analytics(&mut self) {
+        self.state = AppState::Analytics;
+        self.analytics_scroll = 0;
+        
+        // Generate analytics if not cached
+        if self.analytics_data.is_none() {
+            if let Err(e) = self.generate_analytics() {
+                self.error_message = Some(format!("Analytics error: {}", e));
+                self.state = AppState::ConversationList;
+            }
+        }
+    }
+
+    /// Generate analytics data
+    fn generate_analytics(&mut self) -> Result<(), ClaudeToolsError> {
+        if self.analytics_engine.is_none() {
+            self.analytics_engine = Some(AnalyticsEngine::new(self.conversations.clone()));
+        }
+        
+        if let Some(ref mut engine) = self.analytics_engine {
+            let analytics = engine.generate_analytics()?;
+            self.analytics_data = Some(analytics.clone());
+            self.status_message = Some("Analytics generated successfully".to_string());
+        }
+        
+        Ok(())
+    }
+
+    /// Refresh analytics data
+    fn refresh_analytics(&mut self) {
+        self.analytics_data = None;
+        self.analytics_engine = None;
+        if let Err(e) = self.generate_analytics() {
+            self.error_message = Some(format!("Analytics refresh error: {}", e));
+        } else {
+            self.status_message = Some("Analytics refreshed".to_string());
+        }
+    }
+
+    /// Export analytics data
+    fn export_analytics(&mut self) {
+        if let Some(ref analytics) = self.analytics_data {
+            let timestamp = analytics.generated_at.format("%Y%m%d_%H%M%S");
+            let filename = format!("claude_analytics_{}.json", timestamp);
+            
+            match serde_json::to_string_pretty(analytics) {
+                Ok(json_data) => {
+                    match std::fs::write(&filename, json_data) {
+                        Ok(_) => {
+                            self.status_message = Some(format!("Analytics exported to {}", filename));
+                        }
+                        Err(e) => {
+                            self.error_message = Some(format!("Export error: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("JSON error: {}", e));
+                }
+            }
+        } else {
+            self.error_message = Some("No analytics data to export".to_string());
+        }
+    }
+
+    /// Render analytics dashboard
+    fn render_analytics_dashboard(&mut self, frame: &mut Frame, area: Rect) {
+        if let Some(ref analytics) = self.analytics_data {
+            let mut content = Vec::new();
+            
+            // Header
+            content.push(Line::from(vec![
+                Span::styled("📊 ", Style::default().fg(Color::Blue)),
+                Span::styled("Conversation Analytics Dashboard", 
+                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" (Generated: {})", 
+                    analytics.generated_at.format("%Y-%m-%d %H:%M:%S")),
+                    Style::default().fg(Color::DarkGray)),
+            ]));
+            content.push(Line::from(""));
+            
+            // Basic Statistics Section
+            content.push(Line::from(vec![
+                Span::styled("📈 Basic Statistics", 
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ]));
+            let stats = &analytics.basic_stats;
+            content.push(Line::from(format!("   Total conversations: {}", stats.total_conversations)));
+            content.push(Line::from(format!("   Total messages: {}", stats.total_messages)));
+            content.push(Line::from(format!("   User messages: {}", stats.total_user_messages)));
+            content.push(Line::from(format!("   Assistant messages: {}", stats.total_assistant_messages)));
+            content.push(Line::from(format!("   System messages: {}", stats.total_system_messages)));
+            content.push(Line::from(format!("   Tool uses: {}", stats.total_tool_uses)));
+            content.push(Line::from(format!("   Avg. messages per conversation: {:.1}", stats.average_messages_per_conversation)));
+            
+            if let Some(earliest) = &stats.date_range.earliest {
+                content.push(Line::from(format!("   First conversation: {}", earliest.format("%Y-%m-%d"))));
+            }
+            if let Some(latest) = &stats.date_range.latest {
+                content.push(Line::from(format!("   Latest conversation: {}", latest.format("%Y-%m-%d"))));
+            }
+            if let Some(span) = stats.date_range.span_days {
+                content.push(Line::from(format!("   Activity span: {} days", span)));
+            }
+            content.push(Line::from(""));
+            
+            // Top Models Section
+            content.push(Line::from(vec![
+                Span::styled("🤖 Top Models", 
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]));
+            for (i, model) in analytics.model_analytics.top_models.iter().take(5).enumerate() {
+                content.push(Line::from(format!("   {}. {} - {} uses ({:.1}%)", 
+                    i + 1, model.model_name, model.usage_count, model.percentage)));
+            }
+            content.push(Line::from(""));
+            
+            // Top Tools Section
+            content.push(Line::from(vec![
+                Span::styled("🛠️  Top Tools", 
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]));
+            for (i, tool) in analytics.tool_analytics.top_tools.iter().take(5).enumerate() {
+                content.push(Line::from(format!("   {}. {} - {} uses ({:.1}%)", 
+                    i + 1, tool.tool_name, tool.usage_count, tool.percentage)));
+            }
+            content.push(Line::from(""));
+            
+            // Top Projects Section
+            content.push(Line::from(vec![
+                Span::styled("📁 Top Projects", 
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            ]));
+            for (i, project) in analytics.project_analytics.top_projects.iter().take(5).enumerate() {
+                content.push(Line::from(format!("   {}. {} - {} conversations ({:.1}%)", 
+                    i + 1, project.project_name, project.conversation_count, project.percentage)));
+            }
+            content.push(Line::from(""));
+            
+            // Temporal Analysis Section
+            content.push(Line::from(vec![
+                Span::styled("🕒 Peak Usage Hours", 
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            ]));
+            for peak in analytics.temporal_analysis.peak_usage_hours.iter().take(3) {
+                content.push(Line::from(format!("   {}:00 - {} conversations ({:.1}%)", 
+                    peak.hour, peak.count, peak.percentage)));
+            }
+            content.push(Line::from(""));
+            
+            // Quality Metrics Section
+            content.push(Line::from(vec![
+                Span::styled("📊 Quality Metrics", 
+                    Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+            ]));
+            let quality = &analytics.quality_metrics;
+            if let Some(avg_duration) = quality.average_conversation_duration {
+                content.push(Line::from(format!("   Average conversation duration: {:.1} minutes", avg_duration)));
+            }
+            content.push(Line::from(format!("   Average turns per conversation: {:.1}", quality.average_turns_per_conversation)));
+            content.push(Line::from(format!("   Completion rate: {:.1}%", quality.completion_rate)));
+            
+            let msg_dist = &quality.message_length_distribution;
+            content.push(Line::from(format!("   Avg. message length: {:.0} characters", msg_dist.mean)));
+            content.push(Line::from(format!("   Median message length: {} characters", msg_dist.median)));
+            content.push(Line::from(""));
+            
+            // Conversation Length Distribution
+            content.push(Line::from(vec![
+                Span::styled("📈 Conversation Length Distribution", 
+                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            ]));
+            let conv_dist = &analytics.basic_stats.conversation_length_distribution;
+            content.push(Line::from(format!("   Shortest: {} messages", conv_dist.min)));
+            content.push(Line::from(format!("   Longest: {} messages", conv_dist.max)));
+            content.push(Line::from(format!("   Average: {:.1} messages", conv_dist.mean)));
+            content.push(Line::from(format!("   Median: {} messages", conv_dist.median)));
+            content.push(Line::from(""));
+            
+            // Controls
+            content.push(Line::from(vec![
+                Span::styled("⌨️  Controls: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("j/k=scroll, g/G=top/bottom, e=export, r=refresh, q=back", 
+                    Style::default().fg(Color::DarkGray)),
+            ]));
+            
+            // Apply scrolling by slicing content
+            let max_lines = area.height.saturating_sub(2) as usize; // Account for borders
+            let visible_content = if self.analytics_scroll >= content.len() {
+                Vec::new()
+            } else {
+                let end_idx = (self.analytics_scroll + max_lines).min(content.len());
+                content[self.analytics_scroll..end_idx].to_vec()
+            };
+            
+            let paragraph = Paragraph::new(visible_content)
+                .block(
+                    Block::default()
+                        .title("Analytics Dashboard")
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White)),
+                )
+                .wrap(Wrap { trim: false });
+            
+            frame.render_widget(paragraph, area);
+        } else {
+            // Show loading or error state
+            let error_text = vec![
+                Line::from(vec![
+                    Span::styled("⚠️ ", Style::default().fg(Color::Yellow)),
+                    Span::styled("No analytics data available", 
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                ]),
+                Line::from(""),
+                Line::from("Press 'r' to generate analytics data"),
+                Line::from("Press 'q' to return to conversation list"),
+            ];
+            
+            let paragraph = Paragraph::new(error_text)
+                .block(
+                    Block::default()
+                        .title("Analytics Dashboard")
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White)),
+                )
+                .wrap(Wrap { trim: false });
+            
+            frame.render_widget(paragraph, area);
+        }
     }
 }
 
