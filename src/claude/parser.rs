@@ -1,5 +1,6 @@
 use super::conversation::{Conversation, ConversationEntry};
 use super::directory::ClaudeDirectory;
+use super::search::SearchEngine;
 use crate::errors::ClaudeToolsError;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -7,7 +8,7 @@ use std::path::Path;
 
 /// Parser for Claude conversation files
 pub struct ConversationParser {
-    claude_dir: ClaudeDirectory,
+    pub claude_dir: ClaudeDirectory,
 }
 
 impl ConversationParser {
@@ -208,6 +209,14 @@ impl ConversationParser {
             total_assistant_messages,
             projects,
         })
+    }
+
+    /// Build a search engine from all conversations
+    pub fn build_search_engine(&self) -> Result<SearchEngine, ClaudeToolsError> {
+        let conversations = self.parse_all_conversations()?;
+        let mut engine = SearchEngine::new();
+        engine.build_index(conversations)?;
+        Ok(engine)
     }
 }
 

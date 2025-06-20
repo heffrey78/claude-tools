@@ -11,9 +11,17 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 ### 🖥️ Interactive Terminal UI
 - **Vim-style Navigation**: j/k, g/G, /, ?, q keyboard shortcuts
 - **Conversation Browser**: Scrollable list with summaries and metadata
-- **Detail View**: Full conversation display with message content and timestamps
-- **Live Search**: Real-time search across all conversation content
+- **Detail View**: Full conversation display with markdown rendering and syntax highlighting
+- **Advanced Search**: TF-IDF ranking, regex support, visual highlighting, navigation (n/N)
 - **Help System**: Built-in help overlay with all keyboard shortcuts
+
+### 🔍 Advanced Search Features
+- **Multiple Search Modes**: Text, regex (`regex:`), and fuzzy search (`fuzzy:`)
+- **Visual Highlighting**: Yellow background highlighting of search matches
+- **Search Navigation**: Navigate between results with 'n' and 'N' keys
+- **Performance**: <50ms search times with parallel processing and caching
+- **Smart Ranking**: TF-IDF scoring with recency boost and length normalization
+- **Filtering**: Date range and project filtering capabilities
 
 ### 📊 Command Line Interface
 - **List Conversations**: View all conversations with optional detailed view
@@ -55,11 +63,13 @@ cargo run -- stats
 - ✅ Search and filtering functionality
 - ✅ Help system and documentation
 
-### Phase 2: Enhanced Browsing (Planned)
-- Conversation statistics and analytics
-- Export to multiple formats (markdown, PDF, HTML)
-- Conversation tagging and organization
-- Advanced search with regex and filters
+### Phase 2: Enhanced Browsing (In Progress)
+- ✅ Advanced search with TF-IDF ranking and regex support
+- ✅ Visual search highlighting and navigation
+- ✅ Markdown rendering with syntax highlighting
+- 🔲 Conversation statistics and analytics
+- 🔲 Export to multiple formats (markdown, PDF, HTML)
+- 🔲 Conversation tagging and organization
 
 ### Phase 3: MCP Server Management (Planned)
 - Server discovery and lifecycle management
@@ -83,9 +93,11 @@ cargo run -- stats
 
 - **Language**: Rust (for performance and memory safety)
 - **CLI**: clap for argument parsing
-- **TUI**: ratatui for terminal interface
+- **TUI**: ratatui for terminal interface with crossterm
+- **Search**: Custom TF-IDF engine with rayon parallel processing
+- **Rendering**: pulldown-cmark for markdown, syntect for syntax highlighting
 - **JSON**: serde_json with streaming support
-- **Async**: tokio for async operations
+- **Caching**: LRU caching for performance optimization
 
 ## Project Structure
 

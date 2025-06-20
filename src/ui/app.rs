@@ -1,10 +1,11 @@
-use crate::claude::{ClaudeDirectory, Conversation, ConversationParser};
+use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight};
 use crate::errors::ClaudeToolsError;
+use crate::ui::conversation_display::ConversationRenderer;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
@@ -48,6 +49,18 @@ pub struct App {
     status_message: Option<String>,
     /// Error message
     error_message: Option<String>,
+    /// Conversation renderer for markdown and syntax highlighting
+    conversation_renderer: ConversationRenderer,
+    /// Advanced search engine
+    search_engine: SearchEngine,
+    /// Current search results from advanced search
+    advanced_search_results: Vec<SearchResult>,
+    /// Current search mode
+    current_search_mode: SearchMode,
+    /// Current search result index for navigation
+    current_search_result_index: usize,
+    /// Search navigation active
+    search_navigation_active: bool,
 }
 
 impl App {
@@ -61,6 +74,9 @@ impl App {
             list_state.select(Some(0));
         }
 
+        // Build search engine
+        let search_engine = parser.build_search_engine()?;
+
         Ok(Self {
             state: AppState::ConversationList,
             should_quit: false,
@@ -73,6 +89,12 @@ impl App {
             detail_scroll: 0,
             status_message: None,
             error_message: None,
+            conversation_renderer: ConversationRenderer::new(80), // Default width, will update on render
+            search_engine,
+            advanced_search_results: Vec::new(),
+            current_search_mode: SearchMode::Text,
+            current_search_result_index: 0,
+            search_navigation_active: false,
         })
     }
 
@@ -111,6 +133,16 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.start_search();
+            }
+            KeyCode::Char('n') => {
+                if self.search_navigation_active {
+                    self.next_search_result();
+                }
+            }
+            KeyCode::Char('N') => {
+                if self.search_navigation_active {
+                    self.previous_search_result();
+                }
             }
             KeyCode::Char('?') | KeyCode::Char('h') => {
                 self.state = AppState::Help;
@@ -250,20 +282,114 @@ impl App {
     fn start_search(&mut self) {
         self.state = AppState::Search;
         self.search_query.clear();
+        self.search_navigation_active = false;
     }
 
-    /// Execute search
+    /// Navigate to next search result
+    fn next_search_result(&mut self) {
+        if !self.advanced_search_results.is_empty() {
+            self.current_search_result_index = 
+                (self.current_search_result_index + 1) % self.advanced_search_results.len();
+            
+            // Update conversation list selection to match search result
+            if let Some(search_result) = self.advanced_search_results.get(self.current_search_result_index) {
+                if let Some(conv_index) = self.search_results.iter().position(|c| c.session_id == search_result.conversation.session_id) {
+                    self.conversation_list_state.select(Some(conv_index));
+                }
+            }
+            
+            self.status_message = Some(format!(
+                "Search result {}/{}", 
+                self.current_search_result_index + 1, 
+                self.advanced_search_results.len()
+            ));
+        }
+    }
+
+    /// Navigate to previous search result
+    fn previous_search_result(&mut self) {
+        if !self.advanced_search_results.is_empty() {
+            self.current_search_result_index = if self.current_search_result_index == 0 {
+                self.advanced_search_results.len() - 1
+            } else {
+                self.current_search_result_index - 1
+            };
+            
+            // Update conversation list selection to match search result
+            if let Some(search_result) = self.advanced_search_results.get(self.current_search_result_index) {
+                if let Some(conv_index) = self.search_results.iter().position(|c| c.session_id == search_result.conversation.session_id) {
+                    self.conversation_list_state.select(Some(conv_index));
+                }
+            }
+            
+            self.status_message = Some(format!(
+                "Search result {}/{}", 
+                self.current_search_result_index + 1, 
+                self.advanced_search_results.len()
+            ));
+        }
+    }
+
+    /// Execute search with enhanced search engine
     fn execute_search(&mut self) {
         if self.search_query.is_empty() {
             self.search_results.clear();
+            self.advanced_search_results.clear();
             self.status_message = Some("Search cleared".to_string());
         } else {
-            match self.parser.search_conversations(&self.search_query) {
+            // Determine search mode based on query pattern
+            let search_mode = if self.search_query.starts_with("regex:") {
+                SearchMode::Regex
+            } else if self.search_query.starts_with("fuzzy:") {
+                SearchMode::Fuzzy
+            } else {
+                SearchMode::Text
+            };
+
+            // Create search query
+            let query = match search_mode {
+                SearchMode::Regex => {
+                    let pattern = self.search_query.strip_prefix("regex:").unwrap_or(&self.search_query);
+                    SearchQuery::regex(pattern)
+                }
+                SearchMode::Text | SearchMode::Fuzzy => {
+                    SearchQuery::text(&self.search_query)
+                }
+                SearchMode::Advanced => {
+                    SearchQuery::text(&self.search_query)
+                }
+            };
+
+            // Execute advanced search
+            match self.search_engine.search(&query) {
                 Ok(results) => {
-                    self.search_results = results;
-                    self.status_message =
-                        Some(format!("Found {} result(s)", self.search_results.len()));
-                    self.conversation_list_state.select(Some(0));
+                    // Convert SearchResult to Conversation for compatibility
+                    self.search_results = results
+                        .iter()
+                        .map(|result| result.conversation.clone())
+                        .collect();
+                    
+                    self.advanced_search_results = results;
+                    self.current_search_mode = search_mode;
+                    
+                    let total_matches: usize = self.advanced_search_results
+                        .iter()
+                        .map(|r| r.match_count)
+                        .sum();
+                    
+                    self.status_message = Some(format!(
+                        "Found {} conversation(s) with {} total matches",
+                        self.search_results.len(),
+                        total_matches
+                    ));
+                    
+                    if !self.search_results.is_empty() {
+                        self.conversation_list_state.select(Some(0));
+                        self.search_navigation_active = true;
+                        self.current_search_result_index = 0;
+                    } else {
+                        self.search_navigation_active = false;
+                    }
                 }
                 Err(e) => {
                     self.error_message = Some(format!("Search error: {}", e));
@@ -377,71 +503,11 @@ impl App {
         frame.render_stateful_widget(list, area, &mut self.conversation_list_state);
     }
 
-    /// Render conversation detail
+    /// Render conversation detail with enhanced markdown formatting
     fn render_conversation_detail(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(conversation) = &self.selected_conversation {
-            let available_height = area.height.saturating_sub(3); // Account for borders and title
-            let mut lines = Vec::new();
-
-            for (i, msg) in conversation.messages.iter().enumerate() {
-                if i < self.detail_scroll {
-                    continue;
-                }
-
-                let role_str = match msg.role {
-                    crate::claude::conversation::MessageRole::User => "👤 User",
-                    crate::claude::conversation::MessageRole::Assistant => "🤖 Assistant",
-                    crate::claude::conversation::MessageRole::System => "⚙️ System",
-                };
-
-                let timestamp = msg.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-                let header = format!("{} [{}]", role_str, timestamp);
-
-                lines.push(Line::from(vec![Span::styled(
-                    header,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-
-                // Add message content, wrapping long lines
-                let content_lines = msg.content.lines().take(5); // Limit to 5 lines per message for scrolling
-                for content_line in content_lines {
-                    if content_line.trim().is_empty() {
-                        lines.push(Line::from(""));
-                    } else {
-                        let truncated = if content_line.len()
-                            > (area.width as usize).saturating_sub(4)
-                        {
-                            format!(
-                                "{}...",
-                                &content_line[..((area.width as usize).saturating_sub(7)).max(1)]
-                            )
-                        } else {
-                            content_line.to_string()
-                        };
-                        lines.push(Line::from(vec![Span::styled(
-                            truncated,
-                            Style::default().fg(Color::White),
-                        )]));
-                    }
-                }
-
-                // Show tool uses if any
-                if !msg.tool_uses.is_empty() {
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("🛠️ {} tool use(s)", msg.tool_uses.len()),
-                        Style::default().fg(Color::Yellow),
-                    )]));
-                }
-
-                lines.push(Line::from("")); // Empty line between messages
-
-                // Stop if we've filled the available height
-                if lines.len() >= available_height as usize {
-                    break;
-                }
-            }
+            // Update renderer width for responsive layout
+            self.conversation_renderer.update_width(area.width as usize);
 
             let title = format!(
                 "Conversation: {} (Message {}/{})",
@@ -450,17 +516,50 @@ impl App {
                 conversation.messages.len()
             );
 
-            let paragraph = Paragraph::new(lines)
+            // Get visible messages based on scroll position
+            let visible_messages = self.get_visible_messages(conversation, area.height as usize);
+            
+            // Render all visible messages with enhanced formatting and search highlights
+            let mut all_lines = Vec::new();
+            for (idx, message) in visible_messages.iter().enumerate() {
+                let msg_idx = self.detail_scroll + idx;
+                
+                // Get highlights for this message
+                let msg_highlights: Vec<MatchHighlight> = self.advanced_search_results.iter()
+                    .flat_map(|result| &result.match_highlights)
+                    .filter(|highlight| highlight.message_index == msg_idx)
+                    .cloned()
+                    .collect();
+                
+                let rendered_message = if msg_highlights.is_empty() {
+                    self.conversation_renderer.render_message(message)
+                } else {
+                    self.conversation_renderer.render_message_with_highlights(message, &msg_highlights)
+                };
+                
+                all_lines.extend(rendered_message.lines);
+            }
+
+            let paragraph = Paragraph::new(all_lines)
                 .block(
                     Block::default()
                         .title(title)
                         .borders(Borders::ALL)
                         .style(Style::default().fg(Color::White)),
                 )
-                .wrap(Wrap { trim: true });
+                .wrap(Wrap { trim: false });
 
             frame.render_widget(paragraph, area);
         }
+    }
+
+    /// Get messages that should be visible based on scroll position and screen height
+    fn get_visible_messages<'a>(&self, conversation: &'a Conversation, screen_height: usize) -> &'a [crate::claude::conversation::ConversationMessage] {
+        let start_idx = self.detail_scroll;
+        let max_messages = (screen_height / 10).max(1); // Estimate ~10 lines per message
+        let end_idx = (start_idx + max_messages).min(conversation.messages.len());
+        
+        &conversation.messages[start_idx..end_idx]
     }
 
     /// Render help overlay
@@ -488,6 +587,10 @@ impl App {
             Line::from("  Type   - Enter search query"),
             Line::from("  Enter  - Execute search"),
             Line::from("  Esc    - Cancel search"),
+            Line::from("  n      - Next search result"),
+            Line::from("  N      - Previous search result"),
+            Line::from("  regex: - Use regex search"),
+            Line::from("  fuzzy: - Use fuzzy search"),
             Line::from(""),
             Line::from("Press any key to close help"),
         ];
