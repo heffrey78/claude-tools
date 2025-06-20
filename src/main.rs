@@ -24,14 +24,23 @@ fn main() {
             }
             ClaudeToolsError::Config(msg) => {
                 eprintln!("❌ Configuration error: {}", msg);
+                eprintln!("💡 Help: Run 'claude-tools --help' for usage information");
                 std::process::exit(1);
             }
             ClaudeToolsError::Io(io_err) => {
                 eprintln!("❌ IO error: {}", io_err);
+                eprintln!("💡 Suggestions:");
+                eprintln!("   • Check file permissions and disk space");
+                eprintln!("   • Ensure the Claude directory is readable");
+                eprintln!("   • Try running with --verbose for more details");
                 std::process::exit(1);
             }
             ClaudeToolsError::Json(json_err) => {
                 eprintln!("❌ JSON parsing error: {}", json_err);
+                eprintln!("💡 This usually indicates corrupted conversation files");
+                eprintln!("   • The conversation data may be incomplete or corrupted");
+                eprintln!("   • Try refreshing the conversation list with 'r' in interactive mode");
+                eprintln!("   • Check if Claude Code is currently running and try again");
                 std::process::exit(1);
             }
         }

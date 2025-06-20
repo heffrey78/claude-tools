@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
@@ -456,6 +456,165 @@ impl App {
         }
     }
 
+    /// Get context-sensitive help content based on current application state
+    fn get_context_sensitive_help(&self) -> Vec<Line<'static>> {
+        let mut help_text = Vec::new();
+        
+        // Header with application info
+        help_text.push(Line::from(vec![
+            Span::styled(
+                "🚀 Claude Tools ".to_string(), 
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            ),
+            Span::styled(
+                "- Interactive Conversation Browser".to_string(),
+                Style::default().fg(Color::White)
+            ),
+        ]));
+        help_text.push(Line::from(""));
+        
+        // Context-specific help based on current state
+        match self.state {
+            AppState::ConversationList => {
+                help_text.push(Line::from(vec![
+                    Span::styled("📋 ".to_string(), Style::default().fg(Color::Blue)),
+                    Span::styled("CONVERSATION LIST MODE".to_string(), Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                ]));
+                help_text.push(Line::from(""));
+                
+                help_text.extend(vec![
+                    Line::from("📍 Navigation:"),
+                    Line::from("  j / ↓      Move down in list"),
+                    Line::from("  k / ↑      Move up in list"),
+                    Line::from("  g          Jump to first conversation"),
+                    Line::from("  G          Jump to last conversation"),
+                    Line::from("  Enter      Open selected conversation"),
+                    Line::from(""),
+                    Line::from("🔍 Search & Filter:"),
+                    Line::from("  /          Start search mode"),
+                    Line::from("  n          Next search result (when searching)"),
+                    Line::from("  N          Previous search result (when searching)"),
+                    Line::from(""),
+                    Line::from("🔧 Actions:"),
+                    Line::from("  r          Refresh conversation list"),
+                    Line::from("  q / Esc    Quit application"),
+                ]);
+                
+                if self.search_navigation_active {
+                    help_text.push(Line::from(""));
+                    help_text.push(Line::from(vec![
+                        Span::styled("🎯 ".to_string(), Style::default().fg(Color::Yellow)),
+                        Span::styled("Search Active".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(" - Use 'n' and 'N' to navigate results".to_string(), Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            },
+            
+            AppState::ConversationDetail => {
+                help_text.push(Line::from(vec![
+                    Span::styled("💬 ".to_string(), Style::default().fg(Color::Green)),
+                    Span::styled("CONVERSATION DETAIL MODE".to_string(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                ]));
+                help_text.push(Line::from(""));
+                
+                help_text.extend(vec![
+                    Line::from("📍 Navigation:"),
+                    Line::from("  j / ↓      Scroll down through messages"),
+                    Line::from("  k / ↑      Scroll up through messages"),
+                    Line::from("  g          Jump to conversation start"),
+                    Line::from("  G          Jump to conversation end"),
+                    Line::from("  PgDn       Page down (fast scroll)"),
+                    Line::from("  PgUp       Page up (fast scroll)"),
+                    Line::from(""),
+                    Line::from("🔧 Actions:"),
+                    Line::from("  q / Esc    Return to conversation list"),
+                    Line::from("  /          Search within conversation"),
+                ]);
+                
+                if let Some(conversation) = &self.selected_conversation {
+                    help_text.push(Line::from(""));
+                    help_text.push(Line::from(vec![
+                        Span::styled("📊 ".to_string(), Style::default().fg(Color::Cyan)),
+                        Span::styled("Current: ".to_string(), Style::default().fg(Color::Cyan)),
+                        Span::styled(
+                            format!("{} ({} messages)", 
+                                conversation.session_id.chars().take(8).collect::<String>(),
+                                conversation.messages.len()
+                            ),
+                            Style::default().fg(Color::White)
+                        ),
+                    ]));
+                }
+            },
+            
+            AppState::Search => {
+                help_text.push(Line::from(vec![
+                    Span::styled("🔍 ".to_string(), Style::default().fg(Color::Yellow)),
+                    Span::styled("SEARCH MODE".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                ]));
+                help_text.push(Line::from(""));
+                
+                help_text.extend(vec![
+                    Line::from("⌨️  Basic Usage:"),
+                    Line::from("  Type       Enter your search query"),
+                    Line::from("  Enter      Execute search"),
+                    Line::from("  Esc        Cancel and return to list"),
+                    Line::from("  Backspace  Delete characters"),
+                    Line::from(""),
+                    Line::from("🎯 Advanced Search:"),
+                    Line::from("  regex:pattern    Use regular expressions"),
+                    Line::from("  fuzzy:text       Fuzzy/approximate matching"),
+                    Line::from("  plain text       Standard text search"),
+                    Line::from(""),
+                    Line::from("📝 Examples:"),
+                    Line::from("  error handling   Find conversations about error handling"),
+                    Line::from("  regex:async.*fn  Find async functions (regex)"),
+                    Line::from("  fuzzy:classs     Find 'class' with typos"),
+                ]);
+                
+                if !self.search_query.is_empty() {
+                    help_text.push(Line::from(""));
+                    help_text.push(Line::from(vec![
+                        Span::styled("💡 Current Query: ".to_string(), Style::default().fg(Color::Blue)),
+                        Span::styled(self.search_query.clone(), Style::default().fg(Color::White).add_modifier(Modifier::ITALIC)),
+                    ]));
+                }
+            },
+            
+            AppState::Help => {
+                // This shouldn't happen as we're in help mode, but just in case
+                help_text.push(Line::from("Help is already displayed!"));
+            },
+            
+            AppState::Quitting => {
+                help_text.push(Line::from("Application is closing..."));
+            },
+        }
+        
+        // Universal shortcuts (always available)
+        help_text.push(Line::from(""));
+        help_text.push(Line::from(vec![
+            Span::styled("⚡ ".to_string(), Style::default().fg(Color::Magenta)),
+            Span::styled("UNIVERSAL".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        ]));
+        help_text.push(Line::from("  ? / h      Show this help (any mode)"));
+        
+        // Performance & features info
+        help_text.push(Line::from(""));
+        help_text.push(Line::from(vec![
+            Span::styled("✨ Features: ".to_string(), Style::default().fg(Color::Green)),
+            Span::styled("TF-IDF search, syntax highlighting, regex support".to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+        
+        // Footer
+        help_text.push(Line::from(""));
+        help_text.push(Line::from(vec![
+            Span::styled("Press any key to close help".to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]));
+        
+        help_text
+    }
+
     /// Render conversation list
     fn render_conversation_list(&mut self, frame: &mut Frame, area: Rect) {
         let conversations = self.get_current_conversation_list();
@@ -564,39 +723,18 @@ impl App {
 
     /// Render help overlay
     fn render_help_overlay(&mut self, frame: &mut Frame, area: Rect) {
-        let help_text = vec![
-            Line::from("🏠 Conversation List Navigation:"),
-            Line::from("  j/↓    - Move down"),
-            Line::from("  k/↑    - Move up"),
-            Line::from("  g      - Go to first"),
-            Line::from("  G      - Go to last"),
-            Line::from("  Enter  - Open conversation"),
-            Line::from("  /      - Search"),
-            Line::from("  r      - Refresh"),
-            Line::from(""),
-            Line::from("📄 Conversation Detail Navigation:"),
-            Line::from("  j/↓    - Scroll down"),
-            Line::from("  k/↑    - Scroll up"),
-            Line::from("  g      - Go to top"),
-            Line::from("  G      - Go to bottom"),
-            Line::from("  PgDn   - Page down"),
-            Line::from("  PgUp   - Page up"),
-            Line::from("  q/Esc  - Back to list"),
-            Line::from(""),
-            Line::from("🔍 Search Mode:"),
-            Line::from("  Type   - Enter search query"),
-            Line::from("  Enter  - Execute search"),
-            Line::from("  Esc    - Cancel search"),
-            Line::from("  n      - Next search result"),
-            Line::from("  N      - Previous search result"),
-            Line::from("  regex: - Use regex search"),
-            Line::from("  fuzzy: - Use fuzzy search"),
-            Line::from(""),
-            Line::from("Press any key to close help"),
-        ];
+        let help_text = self.get_context_sensitive_help();
+
+        let title = match self.state {
+            AppState::ConversationList => "Help - Conversation List",
+            AppState::ConversationDetail => "Help - Conversation Detail",
+            AppState::Search => "Help - Search Mode",
+            AppState::Help => "Help - Interactive Guide",
+            AppState::Quitting => "Help",
+        };
 
         let block = Block::default()
-            .title("Help - Keyboard Shortcuts")
+            .title(title)
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow));
 
