@@ -48,3 +48,20 @@ build/
 # Backup files
 *.bak
 *.backup
+
+# Claude Tools generated files
+# Export files
+conversation_*.md
+conversation_*.html
+conversation_*.json
+conversation_*.pdf
+
+# Analytics exports
+claude_analytics_*.json
+claude_analytics_*.csv
+
+# Any other export outputs
+export_*.md
+export_*.html
+export_*.json
+export_*.pdf
