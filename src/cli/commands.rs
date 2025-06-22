@@ -1,6 +1,7 @@
 use crate::claude::conversation::MessageRole as ConvMessageRole;
-use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine, ConversationExporter, ExportConfig};
-use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat, ConversationExportFormat};
+use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine, ConversationExporter, ExportConfig, ActivityTimeline, TimelineConfig, TimePeriod, SummaryDepth};
+use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat, ConversationExportFormat, TimelinePeriod, McpAction, ServerStatusFilter, ServerSortField};
+use crate::mcp::{ServerDiscovery, McpServer, ServerStatus};
 use crate::errors::Result;
 use crate::ui::{App, Event, EventHandler};
 use crossterm::{
@@ -43,7 +44,17 @@ pub fn execute_command(
             export,
             detailed,
         } => execute_stats(claude_dir, conversation_id, global, export, detailed, verbose),
+        Commands::Timeline {
+            period,
+            detailed,
+            format,
+            export,
+            output,
+            max_conversations,
+            include_empty,
+        } => execute_timeline(claude_dir, period, detailed, format, export, output, max_conversations, include_empty, verbose),
         Commands::Interactive => execute_interactive(claude_dir, verbose),
+        Commands::Mcp { action } => execute_mcp(action, verbose),
     }
 }
 
@@ -514,6 +525,347 @@ fn generate_csv_export(analytics: &crate::claude::ConversationAnalytics) -> Resu
     Ok(csv_content)
 }
 
+fn execute_timeline(
+    claude_dir: ClaudeDirectory,
+    period: TimelinePeriod,
+    detailed: bool,
+    format: OutputFormat,
+    export: Option<ExportFormat>,
+    output: Option<String>,
+    max_conversations: usize,
+    include_empty: bool,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        eprintln!("Generating activity timeline for {:?} period...", period);
+    }
+
+    // Convert CLI period to internal period
+    let timeline_period = match period {
+        TimelinePeriod::Day => TimePeriod::LastDay,
+        TimelinePeriod::TwoDay => TimePeriod::LastTwoDay,
+        TimelinePeriod::Week => TimePeriod::LastWeek,
+        TimelinePeriod::Month => TimePeriod::LastMonth,
+    };
+
+    // Create timeline configuration
+    let config = TimelineConfig {
+        period: timeline_period,
+        summary_depth: if detailed { SummaryDepth::Detailed } else { SummaryDepth::Brief },
+        max_conversations_per_project: Some(max_conversations),
+        include_empty_projects: include_empty,
+    };
+
+    // Parse conversations and generate timeline
+    let parser = ConversationParser::new(claude_dir);
+    let conversations = parser.parse_all_conversations()?;
+
+    if verbose {
+        eprintln!("Found {} conversations, generating timeline...", conversations.len());
+    }
+
+    let timeline = ActivityTimeline::create_filtered_timeline(conversations, config);
+
+    // Handle export first if requested
+    if let Some(export_format) = export {
+        return handle_timeline_export(&timeline, export_format, output, verbose);
+    }
+
+    // Display timeline based on format
+    match format {
+        OutputFormat::Human => display_timeline_human(&timeline, detailed),
+        OutputFormat::Json => display_timeline_json(&timeline)?,
+        OutputFormat::Markdown => display_timeline_markdown(&timeline, detailed),
+        OutputFormat::Text => display_timeline_text(&timeline, detailed),
+    }
+
+    Ok(())
+}
+
+/// Display timeline in human-readable format
+fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
+    println!("📊 Activity Timeline - {}", timeline.config.period.label());
+    println!("   Generated: {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!();
+
+    // Overall statistics
+    let stats = &timeline.total_stats;
+    println!("📈 Overview:");
+    println!("   Active projects: {}", stats.active_projects);
+    println!("   Total conversations: {}", stats.total_conversations);
+    println!("   Total messages: {}", stats.total_messages);
+    println!("   Messages per day: {:.1}", stats.messages_per_day);
+    
+    if let Some(most_active) = &stats.most_active_project {
+        println!("   Most active project: {}", most_active);
+    }
+    println!();
+
+    // Project breakdown
+    let projects = timeline.projects_by_activity();
+    if projects.is_empty() {
+        println!("💤 No activity found in the selected time period");
+        return;
+    }
+
+    println!("📁 Project Activity ({} projects):", projects.len());
+    println!();
+
+    for (i, project) in projects.iter().enumerate() {
+        let rank = i + 1;
+        println!("{}. 📁 {}", rank, project.project_path);
+        println!("   📊 {} conversations, {} messages", 
+                 project.stats.conversation_count, 
+                 project.stats.total_messages);
+        
+        if detailed {
+            println!("   💬 Avg messages/conversation: {:.1}", project.stats.avg_conversation_length);
+            println!("   📅 Conversations/day: {:.1}", project.stats.conversation_frequency);
+            println!("   📈 Messages/day: {:.1}", project.stats.message_frequency);
+            
+            if let Some(peak_hour) = project.stats.peak_hour {
+                println!("   🕐 Peak hour: {}:00", peak_hour);
+            }
+
+            // Show activity indicators using progress bar
+            let progress_percentage = (project.indicators.progress_bar * 100.0) as u32;
+            let bar_length = (project.indicators.progress_bar * 10.0) as usize;
+            println!("   📊 Activity: {} {}% ({} msgs)", 
+                     "█".repeat(bar_length),
+                     progress_percentage,
+                     project.stats.total_messages);
+
+            // Show top tools if any
+            if !project.stats.top_tools.is_empty() {
+                println!("   🛠️  Top tools: {}", 
+                         project.stats.top_tools.iter()
+                             .take(3)
+                             .map(|(name, count)| format!("{} ({})", name, count))
+                             .collect::<Vec<_>>()
+                             .join(", "));
+            }
+
+            // Show topical summary
+            if !project.topical_summary.summary_text.is_empty() {
+                println!("   📝 Summary: {}", project.topical_summary.summary_text);
+            }
+        }
+        
+        println!();
+    }
+
+    // Show global tools summary
+    if !stats.global_top_tools.is_empty() {
+        println!("🛠️  Most Used Tools:");
+        for (i, (tool, count)) in stats.global_top_tools.iter().take(5).enumerate() {
+            println!("   {}. {} - {} uses", i + 1, tool, count);
+        }
+        println!();
+    }
+}
+
+/// Display timeline in JSON format
+fn display_timeline_json(timeline: &ActivityTimeline) -> Result<()> {
+    let json = serde_json::to_string_pretty(timeline)?;
+    println!("{}", json);
+    Ok(())
+}
+
+/// Display timeline in markdown format
+fn display_timeline_markdown(timeline: &ActivityTimeline, detailed: bool) {
+    println!("# Activity Timeline - {}", timeline.config.period.label());
+    println!();
+    println!("**Generated:** {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!();
+
+    let stats = &timeline.total_stats;
+    println!("## Overview");
+    println!();
+    println!("- **Active projects:** {}", stats.active_projects);
+    println!("- **Total conversations:** {}", stats.total_conversations);
+    println!("- **Total messages:** {}", stats.total_messages);
+    println!("- **Messages per day:** {:.1}", stats.messages_per_day);
+    
+    if let Some(most_active) = &stats.most_active_project {
+        println!("- **Most active project:** {}", most_active);
+    }
+    println!();
+
+    let projects = timeline.projects_by_activity();
+    if projects.is_empty() {
+        println!("## No Activity");
+        println!();
+        println!("No activity found in the selected time period.");
+        return;
+    }
+
+    println!("## Project Activity");
+    println!();
+
+    for (i, project) in projects.iter().enumerate() {
+        let rank = i + 1;
+        println!("### {}. {}", rank, project.project_path);
+        println!();
+        println!("- **Conversations:** {}", project.stats.conversation_count);
+        println!("- **Messages:** {}", project.stats.total_messages);
+        
+        if detailed {
+            println!("- **Avg messages/conversation:** {:.1}", project.stats.avg_conversation_length);
+            println!("- **Activity frequency:** {:.1} conversations/day, {:.1} messages/day", 
+                     project.stats.conversation_frequency, project.stats.message_frequency);
+            
+            if let Some(peak_hour) = project.stats.peak_hour {
+                println!("- **Peak hour:** {}:00", peak_hour);
+            }
+
+            if !project.stats.top_tools.is_empty() {
+                println!("- **Top tools:** {}", 
+                         project.stats.top_tools.iter()
+                             .take(3)
+                             .map(|(name, count)| format!("{} ({})", name, count))
+                             .collect::<Vec<_>>()
+                             .join(", "));
+            }
+
+            if !project.topical_summary.summary_text.is_empty() {
+                println!("- **Summary:** {}", project.topical_summary.summary_text);
+            }
+        }
+        
+        println!();
+    }
+}
+
+/// Display timeline in plain text format
+fn display_timeline_text(timeline: &ActivityTimeline, detailed: bool) {
+    println!("Activity Timeline - {}", timeline.config.period.label());
+    println!("Generated: {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!();
+
+    let stats = &timeline.total_stats;
+    println!("OVERVIEW");
+    println!("Active projects: {}", stats.active_projects);
+    println!("Total conversations: {}", stats.total_conversations);
+    println!("Total messages: {}", stats.total_messages);
+    println!("Messages per day: {:.1}", stats.messages_per_day);
+    
+    if let Some(most_active) = &stats.most_active_project {
+        println!("Most active project: {}", most_active);
+    }
+    println!();
+
+    let projects = timeline.projects_by_activity();
+    if projects.is_empty() {
+        println!("NO ACTIVITY");
+        println!("No activity found in the selected time period.");
+        return;
+    }
+
+    println!("PROJECT ACTIVITY");
+    println!();
+
+    for (i, project) in projects.iter().enumerate() {
+        let rank = i + 1;
+        println!("{}. {}", rank, project.project_path);
+        println!("   {} conversations, {} messages", 
+                 project.stats.conversation_count, 
+                 project.stats.total_messages);
+        
+        if detailed {
+            println!("   Avg messages/conversation: {:.1}", project.stats.avg_conversation_length);
+            println!("   Activity: {:.1} conversations/day, {:.1} messages/day", 
+                     project.stats.conversation_frequency, project.stats.message_frequency);
+            
+            if let Some(peak_hour) = project.stats.peak_hour {
+                println!("   Peak hour: {}:00", peak_hour);
+            }
+
+            if !project.stats.top_tools.is_empty() {
+                println!("   Top tools: {}", 
+                         project.stats.top_tools.iter()
+                             .take(3)
+                             .map(|(name, count)| format!("{} ({})", name, count))
+                             .collect::<Vec<_>>()
+                             .join(", "));
+            }
+
+            if !project.topical_summary.summary_text.is_empty() {
+                println!("   Summary: {}", project.topical_summary.summary_text);
+            }
+        }
+        
+        println!();
+    }
+}
+
+/// Handle timeline export functionality
+fn handle_timeline_export(
+    timeline: &ActivityTimeline,
+    export_format: ExportFormat,
+    output: Option<String>,
+    verbose: bool,
+) -> Result<()> {
+    let timestamp = timeline.generated_at.format("%Y%m%d_%H%M%S");
+    
+    let (filename, data) = match export_format {
+        ExportFormat::Json => {
+            let filename = output.unwrap_or_else(|| format!("timeline_{}.json", timestamp));
+            let data = serde_json::to_string_pretty(timeline)?;
+            (filename, data)
+        },
+        ExportFormat::Csv => {
+            let filename = output.unwrap_or_else(|| format!("timeline_{}.csv", timestamp));
+            let data = generate_timeline_csv_export(timeline)?;
+            (filename, data)
+        },
+    };
+    
+    std::fs::write(&filename, &data)?;
+    
+    println!("📄 Timeline exported to: {}", filename);
+    if verbose {
+        println!("   Format: {:?}", export_format);
+        println!("   Size: {} bytes", data.len());
+        println!("   Projects: {}", timeline.projects.len());
+    }
+    
+    Ok(())
+}
+
+/// Generate CSV export of timeline data
+fn generate_timeline_csv_export(timeline: &ActivityTimeline) -> Result<String> {
+    let mut csv_content = String::new();
+    
+    // Header
+    csv_content.push_str("Project,Conversations,Messages,Avg_Messages_Per_Conv,Conv_Per_Day,Msg_Per_Day,Peak_Hour,Top_Tools,Summary\n");
+    
+    // Data rows
+    for project in timeline.projects_by_activity() {
+        let top_tools = project.stats.top_tools.iter()
+            .take(3)
+            .map(|(name, count)| format!("{}({})", name, count))
+            .collect::<Vec<_>>()
+            .join(";");
+        
+        let summary = project.topical_summary.summary_text.replace(',', ";").replace('\n', " ");
+        let peak_hour = project.stats.peak_hour.map(|h| h.to_string()).unwrap_or_else(|| "".to_string());
+        
+        csv_content.push_str(&format!("{},{},{},{:.1},{:.1},{:.1},{},{},{}\n",
+            project.project_path,
+            project.stats.conversation_count,
+            project.stats.total_messages,
+            project.stats.avg_conversation_length,
+            project.stats.conversation_frequency,
+            project.stats.message_frequency,
+            peak_hour,
+            top_tools,
+            summary
+        ));
+    }
+    
+    Ok(csv_content)
+}
+
 fn execute_interactive(claude_dir: ClaudeDirectory, verbose: bool) -> Result<()> {
     if verbose {
         eprintln!("Starting interactive mode");
@@ -643,5 +995,269 @@ fn handle_conversation_export(
             eprintln!("❌ Export failed: {}", e);
             Err(e)
         }
+    }
+}
+
+fn execute_mcp(action: McpAction, verbose: bool) -> Result<()> {
+    match action {
+        McpAction::List { detailed, status, format, sort } => {
+            execute_mcp_list(detailed, status, format, sort, verbose)
+        }
+        McpAction::Discover { health_check, verbose: discover_verbose, paths } => {
+            execute_mcp_discover(health_check, discover_verbose || verbose, paths)
+        }
+        McpAction::Add { name, command, args, env, global, project } => {
+            crate::mcp::commands::execute_mcp_add(name, command, args, env, global, project, verbose)
+        }
+        McpAction::Remove { name, global, project } => {
+            crate::mcp::commands::execute_mcp_remove(name, global, project, verbose)
+        }
+        McpAction::Update { name, command, args, env, global, project } => {
+            crate::mcp::commands::execute_mcp_update(name, command, args, env, global, project, verbose)
+        }
+    }
+}
+
+fn execute_mcp_list(
+    detailed: bool,
+    status_filter: Option<ServerStatusFilter>,
+    format: OutputFormat,
+    sort: ServerSortField,
+    verbose: bool,
+) -> Result<()> {
+    // First show Claude Code servers from ~/.claude.json
+    if verbose {
+        eprintln!("Loading Claude Code MCP servers from ~/.claude.json...");
+    }
+    
+    match crate::mcp::commands::list_claude_servers(verbose) {
+        Ok(_) => {},
+        Err(e) => {
+            eprintln!("Warning: Could not load Claude Code servers: {}", e);
+        }
+    }
+    
+    println!();
+    println!("{}", "─".repeat(60));
+    println!();
+    
+    // Then discover and show other MCP servers
+    if verbose {
+        eprintln!("Discovering other MCP servers...");
+    }
+
+    // Discover servers
+    let discovery = ServerDiscovery::new();
+    let result = discovery.discover_servers()?;
+
+    if verbose {
+        eprintln!("{}", result.summary());
+        if !result.errors.is_empty() {
+            eprintln!("Warnings:");
+            for error in &result.errors {
+                eprintln!("  {}: {}", error.path.display(), error.message);
+            }
+        }
+        eprintln!();
+    }
+
+    // Filter servers by status if specified
+    let mut servers = result.servers;
+    if let Some(filter) = status_filter {
+        servers = filter_servers_by_status(servers, &filter);
+    }
+
+    // Sort servers
+    sort_servers(&mut servers, &sort);
+
+    // Display results
+    match format {
+        OutputFormat::Human => {
+            display_servers_human(&servers, detailed);
+        }
+        OutputFormat::Json => {
+            display_servers_json(&servers)?;
+        }
+        OutputFormat::Markdown | OutputFormat::Text => {
+            display_servers_markdown(&servers, detailed);
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_mcp_discover(
+    health_check: bool,
+    verbose: bool,
+    custom_paths: Vec<String>,
+) -> Result<()> {
+    if verbose {
+        eprintln!("Starting MCP server discovery...");
+    }
+
+    // Create discovery instance
+    let discovery = if custom_paths.is_empty() {
+        ServerDiscovery::new()
+    } else {
+        let paths: Vec<std::path::PathBuf> = custom_paths.into_iter().map(std::path::PathBuf::from).collect();
+        ServerDiscovery::with_paths(paths)
+    }.with_health_checks(health_check);
+
+    // Perform discovery
+    let result = discovery.discover_servers()?;
+
+    // Display results
+    println!("🔍 {}", result.summary());
+    
+    if !result.servers.is_empty() {
+        println!("\n📋 Discovered servers:");
+        for server in &result.servers {
+            let status_emoji = server.status.emoji();
+            println!("  {} {} - {}", status_emoji, server.name, server.transport.description());
+            if verbose {
+                println!("     ID: {}", server.id);
+                println!("     Config: {}", server.config_path.display());
+                if let Some(version) = &server.version {
+                    println!("     Version: {}", version);
+                }
+                if !server.capabilities.is_empty() {
+                    println!("     Capabilities: {}", 
+                        server.capabilities.iter()
+                            .map(|c| c.description())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+        }
+    }
+
+    if !result.errors.is_empty() {
+        println!("\n⚠️  Warnings ({}):", result.errors.len());
+        for error in &result.errors {
+            println!("  {} - {}", error.path.display(), error.message);
+        }
+    }
+
+    if verbose {
+        println!("\n📁 Scanned paths:");
+        for path in &result.scanned_paths {
+            let exists = if path.exists() { "✓" } else { "✗" };
+            println!("  {} {}", exists, path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn filter_servers_by_status(servers: Vec<McpServer>, filter: &ServerStatusFilter) -> Vec<McpServer> {
+    servers.into_iter().filter(|server| {
+        match filter {
+            ServerStatusFilter::Running => matches!(server.status, ServerStatus::Running),
+            ServerStatusFilter::Stopped => matches!(server.status, ServerStatus::Stopped),
+            ServerStatusFilter::Error => matches!(server.status, ServerStatus::Error(_)),
+            ServerStatusFilter::Unknown => matches!(server.status, ServerStatus::Unknown),
+            ServerStatusFilter::Transitional => matches!(server.status, ServerStatus::Starting | ServerStatus::Stopping),
+        }
+    }).collect()
+}
+
+fn sort_servers(servers: &mut [McpServer], sort: &ServerSortField) {
+    match sort {
+        ServerSortField::Name => {
+            servers.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        ServerSortField::Status => {
+            servers.sort_by(|a, b| format!("{:?}", a.status).cmp(&format!("{:?}", b.status)));
+        }
+        ServerSortField::Version => {
+            servers.sort_by(|a, b| {
+                let a_version = a.version.as_deref().unwrap_or("");
+                let b_version = b.version.as_deref().unwrap_or("");
+                a_version.cmp(b_version)
+            });
+        }
+        ServerSortField::LastCheck => {
+            servers.sort_by(|a, b| a.last_health_check.cmp(&b.last_health_check));
+        }
+    }
+}
+
+fn display_servers_human(servers: &[McpServer], detailed: bool) {
+    if servers.is_empty() {
+        println!("No MCP servers found");
+        println!();
+        println!("💡 Tips:");
+        println!("  • Install MCP servers in VS Code or Cursor");
+        println!("  • Create MCP configurations in ~/.mcp/");
+        println!("  • Use 'claude-tools mcp discover --verbose' to see scanned paths");
+        return;
+    }
+
+    println!("🖥️  Found {} MCP server(s):", servers.len());
+    println!();
+
+    for server in servers {
+        let status_emoji = server.status.emoji();
+        println!("📄 {} {}", status_emoji, server.name);
+        
+        if detailed {
+            for line in server.detailed_info() {
+                println!("   {}", line);
+            }
+        } else {
+            println!("   {}", server.transport.description());
+            if let Some(version) = &server.version {
+                println!("   Version: {}", version);
+            }
+            if let Some(description) = &server.description {
+                println!("   {}", description);
+            }
+        }
+        
+        println!();
+    }
+}
+
+fn display_servers_json(servers: &[McpServer]) -> Result<()> {
+    let json = serde_json::to_string_pretty(servers)?;
+    println!("{}", json);
+    Ok(())
+}
+
+fn display_servers_markdown(servers: &[McpServer], detailed: bool) {
+    println!("# MCP Servers");
+    println!();
+    
+    if servers.is_empty() {
+        println!("No MCP servers found.");
+        return;
+    }
+
+    println!("Found {} MCP server(s):", servers.len());
+    println!();
+
+    for server in servers {
+        let status_emoji = server.status.emoji();
+        println!("## {} {}", status_emoji, server.name);
+        
+        if let Some(description) = &server.description {
+            println!("{}", description);
+            println!();
+        }
+        
+        if detailed {
+            println!("**Details:**");
+            for line in server.detailed_info() {
+                println!("- {}", line);
+            }
+        } else {
+            println!("- **Transport:** {}", server.transport.description());
+            if let Some(version) = &server.version {
+                println!("- **Version:** {}", version);
+            }
+        }
+        
+        println!();
     }
 }

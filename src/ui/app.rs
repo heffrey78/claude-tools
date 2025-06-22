@@ -373,7 +373,10 @@ impl App {
             KeyCode::Char('G') => {
                 self.timeline_project_index = self.timeline_projects.len().saturating_sub(1);
             }
-            KeyCode::Enter | KeyCode::Tab => {
+            KeyCode::Enter => {
+                self.open_timeline_project_conversations();
+            }
+            KeyCode::Tab => {
                 self.toggle_timeline_project();
             }
             KeyCode::PageDown => {
@@ -906,6 +909,7 @@ impl App {
                     Line::from("🔧 Actions:"),
                     Line::from("  r          Refresh conversation list"),
                     Line::from("  a          Analytics dashboard"),
+                    Line::from("  t          Activity timeline dashboard"),
                     Line::from("  m          MCP server dashboard"),
                     Line::from("  q / Esc    Quit application"),
                 ]);
@@ -1028,7 +1032,8 @@ impl App {
                     Line::from("  k / ↑      Move up project list"),
                     Line::from("  g          Jump to first project"),
                     Line::from("  G          Jump to last project"),
-                    Line::from("  Enter/Tab  Expand/collapse project details"),
+                    Line::from("  Enter      Navigate to project conversations"),
+                    Line::from("  Tab        Expand/collapse project details"),
                     Line::from("  PgDn       Page down (fast scroll)"),
                     Line::from("  PgUp       Page up (fast scroll)"),
                     Line::from(""),
@@ -1385,7 +1390,7 @@ impl App {
             AppState::Analytics => "Press j/k to scroll, e to export, r to refresh, q to go back".to_string(),
             AppState::Timeline => {
                 let cache_status = if self.timeline_cache.is_some() { " • Cache enabled" } else { "" };
-                format!("j/k: navigate, Enter/Tab: expand, 1/2/7/3: time periods, C: clear cache, q: back{}", cache_status)
+                format!("j/k: navigate, Enter: view conversations, Tab: expand, 1/2/7/3: time periods, C: clear cache, q: back{}", cache_status)
             },
             AppState::Export => "Select format with j/k, Enter to export, q to cancel".to_string(),
             AppState::McpServerDashboard => "Press j/k to navigate, r to refresh, d for health checks, ? for help, q to go back".to_string(),
@@ -1636,6 +1641,36 @@ impl App {
                 self.timeline_expanded_projects.remove(project);
             } else {
                 self.timeline_expanded_projects.insert(project.clone());
+            }
+        }
+    }
+
+    /// Navigate from timeline to conversations for selected project
+    fn open_timeline_project_conversations(&mut self) {
+        if let Some(project_path) = self.timeline_projects.get(self.timeline_project_index) {
+            // Get conversations for this project
+            match self.parser.get_project_conversations(project_path) {
+                Ok(project_conversations) => {
+                    if !project_conversations.is_empty() {
+                        // Filter main conversation list to this project's conversations
+                        self.conversations = project_conversations;
+                        
+                        // Reset list state and select first conversation
+                        self.conversation_list_state = ratatui::widgets::ListState::default();
+                        if !self.conversations.is_empty() {
+                            self.conversation_list_state.select(Some(0));
+                        }
+                        
+                        // Navigate back to conversation list view
+                        self.state = AppState::ConversationList;
+                        self.status_message = Some(format!("Showing {} conversations for project: {}", self.conversations.len(), project_path));
+                    } else {
+                        self.error_message = Some(format!("No conversations found for project: {}", project_path));
+                    }
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Error loading project conversations: {}", e));
+                }
             }
         }
     }

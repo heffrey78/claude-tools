@@ -1,4 +1,4 @@
-use super::conversation::{Conversation, MessageRole};
+use super::conversation::{Conversation, MessageRole, ConversationMessage};
 use crate::errors::ClaudeToolsError;
 use chrono::Utc;
 use serde::{Serialize, Deserialize};
@@ -467,6 +467,8 @@ mod tests {
             summary: Some("Test conversation".to_string()),
             messages: vec![
                 ConversationMessage {
+                    uuid: "msg-1".to_string(),
+                    parent_uuid: None,
                     role: MessageRole::User,
                     content: "Hello, how are you?".to_string(),
                     timestamp: Utc::now(),
@@ -474,6 +476,8 @@ mod tests {
                     tool_uses: vec![],
                 },
                 ConversationMessage {
+                    uuid: "msg-2".to_string(),
+                    parent_uuid: Some("msg-1".to_string()),
                     role: MessageRole::Assistant,
                     content: "I'm doing well, thank you!".to_string(),
                     timestamp: Utc::now(),
@@ -513,7 +517,7 @@ mod tests {
         let content = result.unwrap();
         assert!(content.contains("<!DOCTYPE html"));
         assert!(content.contains("Hello, how are you?"));
-        assert!(content.contains("I'm doing well, thank you!"));
+        assert!(content.contains("I&#x27;m doing well, thank you!"));
     }
 
     #[test]
