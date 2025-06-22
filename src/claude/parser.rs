@@ -17,6 +17,11 @@ impl ConversationParser {
         Self { claude_dir }
     }
 
+    /// Get the projects directory path  
+    pub fn projects_dir(&self) -> std::path::PathBuf {
+        self.claude_dir.path.join("projects")
+    }
+
     /// Parse all conversations in the Claude directory
     pub fn parse_all_conversations(&self) -> Result<Vec<Conversation>, ClaudeToolsError> {
         let mut conversations = Vec::new();
