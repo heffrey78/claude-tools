@@ -1,9 +1,13 @@
-use crate::claude::{ClaudeDirectory, Conversation, ConversationParser, SearchEngine, SearchQuery, SearchResult, SearchMode, MatchHighlight, AnalyticsEngine, ConversationAnalytics, ConversationExporter, ExportConfig, ExportFormat, ActivityTimeline, TimelineConfig, TimePeriod, SummaryDepth, ActivityTrend, RankingIndicator, MessageRole, TimelineCache};
+use crate::claude::{
+    ActivityTimeline, ActivityTrend, AnalyticsEngine, ClaudeDirectory, Conversation,
+    ConversationAnalytics, ConversationExporter, ConversationParser, ExportConfig, ExportFormat,
+    HighlightType, MatchHighlight, MessageRole, RankingIndicator, SearchEngine, SearchMode, SearchQuery,
+    SearchResult, SummaryDepth, TimePeriod, TimelineCache, TimelineConfig,
+};
 use crate::errors::ClaudeToolsError;
-use crate::mcp::{ServerDiscovery, McpServer, ServerStatus, DiscoveryResult};
+use crate::mcp::{DiscoveryResult, McpServer, ServerDiscovery, ServerStatus};
 use crate::ui::conversation_display::ConversationRenderer;
-use crossterm::event::{KeyCode, KeyEvent};
-use std::collections::HashSet;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,6 +15,31 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use std::collections::HashSet;
+
+/// In-conversation search match information
+#[derive(Debug, Clone)]
+pub struct InConversationMatch {
+    /// Message index in the conversation
+    pub message_index: usize,
+    /// Start position of match within message content
+    pub start_pos: usize,
+    /// End position of match within message content
+    pub end_pos: usize,
+    /// Matched text
+    pub matched_text: String,
+    /// Context around the match (for display)
+    pub context: String,
+}
+
+/// In-conversation search mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum InConversationSearchMode {
+    /// Plain text search
+    Text,
+    /// Regular expression search
+    Regex,
+}
 
 /// Application state
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +50,8 @@ pub enum AppState {
     ConversationDetail,
     /// Search mode
     Search,
+    /// In-conversation search mode
+    InConversationSearch,
     /// Analytics dashboard
     Analytics,
     /// Timeline dashboard
@@ -109,6 +140,16 @@ pub struct App {
     timeline_cache: Option<TimelineCache>,
     /// Timeline loading state
     timeline_loading: bool,
+    /// In-conversation search query
+    in_conversation_search_query: String,
+    /// In-conversation search matches
+    in_conversation_search_matches: Vec<InConversationMatch>,
+    /// Current match index for navigation
+    in_conversation_match_index: usize,
+    /// In-conversation search mode (text/regex)
+    in_conversation_search_mode: InConversationSearchMode,
+    /// Previous state before in-conversation search
+    previous_state_before_search: Option<AppState>,
 }
 
 impl App {
@@ -180,6 +221,11 @@ impl App {
             timeline_expanded_projects: HashSet::new(),
             timeline_cache,
             timeline_loading: false,
+            in_conversation_search_query: String::new(),
+            in_conversation_search_matches: Vec::new(),
+            in_conversation_match_index: 0,
+            in_conversation_search_mode: InConversationSearchMode::Text,
+            previous_state_before_search: None,
         })
     }
 
@@ -189,6 +235,7 @@ impl App {
             AppState::ConversationList => self.handle_list_key_event(key),
             AppState::ConversationDetail => self.handle_detail_key_event(key),
             AppState::Search => self.handle_search_key_event(key),
+            AppState::InConversationSearch => self.handle_in_conversation_search_key_event(key),
             AppState::Analytics => self.handle_analytics_key_event(key),
             AppState::Timeline => self.handle_timeline_key_event(key),
             AppState::Export => self.handle_export_key_event(key),
@@ -291,6 +338,12 @@ impl App {
             KeyCode::Char('e') => {
                 self.start_export();
             }
+            KeyCode::Char('/') => {
+                self.start_in_conversation_search();
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.start_in_conversation_search();
+            }
             _ => {}
         }
     }
@@ -311,6 +364,33 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.search_query.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle key events in in-conversation search mode
+    fn handle_in_conversation_search_key_event(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.execute_in_conversation_search();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.exit_in_conversation_search();
+            }
+            KeyCode::Backspace => {
+                self.in_conversation_search_query.pop();
+                self.execute_in_conversation_search();
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.navigate_to_next_match();
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.navigate_to_previous_match();
+            }
+            KeyCode::Char(c) => {
+                self.in_conversation_search_query.push(c);
+                self.execute_in_conversation_search();
             }
             _ => {}
         }
@@ -458,11 +538,14 @@ impl App {
                 // Check if format is available
                 let format = &self.export_formats[self.export_format_index];
                 let available = !matches!(format, ExportFormat::Pdf);
-                
+
                 if available {
                     self.execute_export();
                 } else {
-                    self.error_message = Some("PDF export requires external tools. Use HTML export and convert manually.".to_string());
+                    self.error_message = Some(
+                        "PDF export requires external tools. Use HTML export and convert manually."
+                            .to_string(),
+                    );
                     self.state = AppState::ConversationDetail;
                 }
             }
@@ -599,7 +682,8 @@ impl App {
     /// Move to last MCP server
     fn last_mcp_server(&mut self) {
         if !self.mcp_servers.is_empty() {
-            self.mcp_server_list_state.select(Some(self.mcp_servers.len() - 1));
+            self.mcp_server_list_state
+                .select(Some(self.mcp_servers.len() - 1));
         }
     }
 
@@ -622,22 +706,41 @@ impl App {
         self.search_navigation_active = false;
     }
 
+    /// Start in-conversation search mode
+    fn start_in_conversation_search(&mut self) {
+        if self.selected_conversation.is_some() {
+            self.previous_state_before_search = Some(self.state.clone());
+            self.state = AppState::InConversationSearch;
+            self.in_conversation_search_query.clear();
+            self.in_conversation_search_matches.clear();
+            self.in_conversation_match_index = 0;
+            self.in_conversation_search_mode = InConversationSearchMode::Text;
+        }
+    }
+
     /// Navigate to next search result
     fn next_search_result(&mut self) {
         if !self.advanced_search_results.is_empty() {
-            self.current_search_result_index = 
+            self.current_search_result_index =
                 (self.current_search_result_index + 1) % self.advanced_search_results.len();
-            
+
             // Update conversation list selection to match search result
-            if let Some(search_result) = self.advanced_search_results.get(self.current_search_result_index) {
-                if let Some(conv_index) = self.search_results.iter().position(|c| c.session_id == search_result.conversation.session_id) {
+            if let Some(search_result) = self
+                .advanced_search_results
+                .get(self.current_search_result_index)
+            {
+                if let Some(conv_index) = self
+                    .search_results
+                    .iter()
+                    .position(|c| c.session_id == search_result.conversation.session_id)
+                {
                     self.conversation_list_state.select(Some(conv_index));
                 }
             }
-            
+
             self.status_message = Some(format!(
-                "Search result {}/{}", 
-                self.current_search_result_index + 1, 
+                "Search result {}/{}",
+                self.current_search_result_index + 1,
                 self.advanced_search_results.len()
             ));
         }
@@ -651,17 +754,24 @@ impl App {
             } else {
                 self.current_search_result_index - 1
             };
-            
+
             // Update conversation list selection to match search result
-            if let Some(search_result) = self.advanced_search_results.get(self.current_search_result_index) {
-                if let Some(conv_index) = self.search_results.iter().position(|c| c.session_id == search_result.conversation.session_id) {
+            if let Some(search_result) = self
+                .advanced_search_results
+                .get(self.current_search_result_index)
+            {
+                if let Some(conv_index) = self
+                    .search_results
+                    .iter()
+                    .position(|c| c.session_id == search_result.conversation.session_id)
+                {
                     self.conversation_list_state.select(Some(conv_index));
                 }
             }
-            
+
             self.status_message = Some(format!(
-                "Search result {}/{}", 
-                self.current_search_result_index + 1, 
+                "Search result {}/{}",
+                self.current_search_result_index + 1,
                 self.advanced_search_results.len()
             ));
         }
@@ -686,15 +796,14 @@ impl App {
             // Create search query
             let query = match search_mode {
                 SearchMode::Regex => {
-                    let pattern = self.search_query.strip_prefix("regex:").unwrap_or(&self.search_query);
+                    let pattern = self
+                        .search_query
+                        .strip_prefix("regex:")
+                        .unwrap_or(&self.search_query);
                     SearchQuery::regex(pattern)
                 }
-                SearchMode::Text | SearchMode::Fuzzy => {
-                    SearchQuery::text(&self.search_query)
-                }
-                SearchMode::Advanced => {
-                    SearchQuery::text(&self.search_query)
-                }
+                SearchMode::Text | SearchMode::Fuzzy => SearchQuery::text(&self.search_query),
+                SearchMode::Advanced => SearchQuery::text(&self.search_query),
             };
 
             // Execute advanced search
@@ -705,21 +814,22 @@ impl App {
                         .iter()
                         .map(|result| result.conversation.clone())
                         .collect();
-                    
+
                     self.advanced_search_results = results;
                     self.current_search_mode = search_mode;
-                    
-                    let total_matches: usize = self.advanced_search_results
+
+                    let total_matches: usize = self
+                        .advanced_search_results
                         .iter()
                         .map(|r| r.match_count)
                         .sum();
-                    
+
                     self.status_message = Some(format!(
                         "Found {} conversation(s) with {} total matches",
                         self.search_results.len(),
                         total_matches
                     ));
-                    
+
                     if !self.search_results.is_empty() {
                         self.conversation_list_state.select(Some(0));
                         self.search_navigation_active = true;
@@ -769,7 +879,7 @@ impl App {
     fn start_mcp_dashboard(&mut self) {
         self.state = AppState::McpServerDashboard;
         self.mcp_scroll = 0;
-        
+
         // Perform initial discovery if no servers are loaded
         if self.mcp_servers.is_empty() {
             self.refresh_mcp_servers();
@@ -782,13 +892,13 @@ impl App {
             Ok(result) => {
                 self.mcp_servers = result.servers.clone();
                 self.last_discovery_result = Some(result.clone());
-                
+
                 if !self.mcp_servers.is_empty() && self.mcp_server_list_state.selected().is_none() {
                     self.mcp_server_list_state.select(Some(0));
                 }
-                
+
                 self.status_message = Some(format!(
-                    "Found {} MCP server(s) in {:.2}s", 
+                    "Found {} MCP server(s) in {:.2}s",
                     result.server_count(),
                     result.scan_duration.as_secs_f64()
                 ));
@@ -806,13 +916,13 @@ impl App {
             Ok(result) => {
                 self.mcp_servers = result.servers.clone();
                 self.last_discovery_result = Some(result.clone());
-                
+
                 if !self.mcp_servers.is_empty() && self.mcp_server_list_state.selected().is_none() {
                     self.mcp_server_list_state.select(Some(0));
                 }
-                
+
                 self.status_message = Some(format!(
-                    "Discovery with health checks: {} server(s) in {:.2}s", 
+                    "Discovery with health checks: {} server(s) in {:.2}s",
                     result.server_count(),
                     result.scan_duration.as_secs_f64()
                 ));
@@ -837,6 +947,10 @@ impl App {
             AppState::ConversationDetail => {
                 self.render_conversation_detail(frame, chunks[0]);
             }
+            AppState::InConversationSearch => {
+                self.render_conversation_detail(frame, chunks[0]);
+                self.render_in_conversation_search_input(frame, frame.area());
+            }
             AppState::Analytics => {
                 self.render_analytics_dashboard(frame, chunks[0]);
             }
@@ -852,7 +966,9 @@ impl App {
             }
             AppState::Help => {
                 match self.state {
-                    AppState::McpServerDashboard => self.render_mcp_server_dashboard(frame, chunks[0]),
+                    AppState::McpServerDashboard => {
+                        self.render_mcp_server_dashboard(frame, chunks[0])
+                    }
                     _ => self.render_conversation_list(frame, chunks[0]),
                 }
                 self.render_help_overlay(frame, frame.area());
@@ -870,29 +986,36 @@ impl App {
     /// Get context-sensitive help content based on current application state
     fn get_context_sensitive_help(&self) -> Vec<Line<'static>> {
         let mut help_text = Vec::new();
-        
+
         // Header with application info
         help_text.push(Line::from(vec![
             Span::styled(
-                "🚀 Claude Tools ".to_string(), 
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                "🚀 Claude Tools ".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "- Interactive Conversation Browser".to_string(),
-                Style::default().fg(Color::White)
+                Style::default().fg(Color::White),
             ),
         ]));
         help_text.push(Line::from(""));
-        
+
         // Context-specific help based on current state
         match self.state {
             AppState::ConversationList => {
                 help_text.push(Line::from(vec![
                     Span::styled("📋 ".to_string(), Style::default().fg(Color::Blue)),
-                    Span::styled("CONVERSATION LIST MODE".to_string(), Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "CONVERSATION LIST MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Navigation:"),
                     Line::from("  j / ↓      Move down in list"),
@@ -913,24 +1036,37 @@ impl App {
                     Line::from("  m          MCP server dashboard"),
                     Line::from("  q / Esc    Quit application"),
                 ]);
-                
+
                 if self.search_navigation_active {
                     help_text.push(Line::from(""));
                     help_text.push(Line::from(vec![
                         Span::styled("🎯 ".to_string(), Style::default().fg(Color::Yellow)),
-                        Span::styled("Search Active".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                        Span::styled(" - Use 'n' and 'N' to navigate results".to_string(), Style::default().fg(Color::Yellow)),
+                        Span::styled(
+                            "Search Active".to_string(),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            " - Use 'n' and 'N' to navigate results".to_string(),
+                            Style::default().fg(Color::Yellow),
+                        ),
                     ]));
                 }
-            },
-            
+            }
+
             AppState::ConversationDetail => {
                 help_text.push(Line::from(vec![
                     Span::styled("💬 ".to_string(), Style::default().fg(Color::Green)),
-                    Span::styled("CONVERSATION DETAIL MODE".to_string(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "CONVERSATION DETAIL MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Navigation:"),
                     Line::from("  j / ↓      Scroll down through messages"),
@@ -945,30 +1081,36 @@ impl App {
                     Line::from("  e          Export conversation to file"),
                     Line::from("  /          Search within conversation"),
                 ]);
-                
+
                 if let Some(conversation) = &self.selected_conversation {
                     help_text.push(Line::from(""));
                     help_text.push(Line::from(vec![
                         Span::styled("📊 ".to_string(), Style::default().fg(Color::Cyan)),
                         Span::styled("Current: ".to_string(), Style::default().fg(Color::Cyan)),
                         Span::styled(
-                            format!("{} ({} messages)", 
+                            format!(
+                                "{} ({} messages)",
                                 conversation.session_id.chars().take(8).collect::<String>(),
                                 conversation.messages.len()
                             ),
-                            Style::default().fg(Color::White)
+                            Style::default().fg(Color::White),
                         ),
                     ]));
                 }
-            },
-            
+            }
+
             AppState::Search => {
                 help_text.push(Line::from(vec![
                     Span::styled("🔍 ".to_string(), Style::default().fg(Color::Yellow)),
-                    Span::styled("SEARCH MODE".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "SEARCH MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("⌨️  Basic Usage:"),
                     Line::from("  Type       Enter your search query"),
@@ -986,23 +1128,74 @@ impl App {
                     Line::from("  regex:async.*fn  Find async functions (regex)"),
                     Line::from("  fuzzy:classs     Find 'class' with typos"),
                 ]);
-                
+
                 if !self.search_query.is_empty() {
                     help_text.push(Line::from(""));
                     help_text.push(Line::from(vec![
-                        Span::styled("💡 Current Query: ".to_string(), Style::default().fg(Color::Blue)),
-                        Span::styled(self.search_query.clone(), Style::default().fg(Color::White).add_modifier(Modifier::ITALIC)),
+                        Span::styled(
+                            "💡 Current Query: ".to_string(),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::styled(
+                            self.search_query.clone(),
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
                     ]));
                 }
-            },
-            
+            }
+
+            AppState::InConversationSearch => {
+                help_text.push(Line::from(vec![
+                    Span::styled("🔍 ".to_string(), Style::default().fg(Color::Blue)),
+                    Span::styled(
+                        "IN-CONVERSATION SEARCH MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                help_text.push(Line::from(""));
+                help_text.push(Line::from(vec![
+                    Span::styled("Enter".to_string(), Style::default().fg(Color::Yellow)),
+                    Span::raw(" - Execute search"),
+                ]));
+                help_text.push(Line::from(vec![
+                    Span::styled("Esc/q".to_string(), Style::default().fg(Color::Yellow)),
+                    Span::raw(" - Exit search mode"),
+                ]));
+                help_text.push(Line::from(vec![
+                    Span::styled("Ctrl+N".to_string(), Style::default().fg(Color::Yellow)),
+                    Span::raw(" - Next match"),
+                ]));
+                help_text.push(Line::from(vec![
+                    Span::styled("Ctrl+P".to_string(), Style::default().fg(Color::Yellow)),
+                    Span::raw(" - Previous match"),
+                ]));
+                help_text.push(Line::from(vec![
+                    Span::styled("regex:pattern".to_string(), Style::default().fg(Color::Green)),
+                    Span::raw(" - Use regex search"),
+                ]));
+                help_text.push(Line::from(""));
+                help_text.push(Line::from(vec![
+                    Span::styled("💡 Tip: ".to_string(), Style::default().fg(Color::Cyan)),
+                    Span::raw("Type to search in real-time, use regex: prefix for patterns"),
+                ]));
+            }
+
             AppState::Analytics => {
                 help_text.push(Line::from(vec![
                     Span::styled("📊 ".to_string(), Style::default().fg(Color::Blue)),
-                    Span::styled("ANALYTICS DASHBOARD MODE".to_string(), Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "ANALYTICS DASHBOARD MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Navigation:"),
                     Line::from("  j / ↓      Scroll down through analytics"),
@@ -1017,15 +1210,20 @@ impl App {
                     Line::from("  r          Refresh analytics data"),
                     Line::from("  q / Esc    Return to conversation list"),
                 ]);
-            },
+            }
 
             AppState::Timeline => {
                 help_text.push(Line::from(vec![
                     Span::styled("🕐 ".to_string(), Style::default().fg(Color::Magenta)),
-                    Span::styled("ACTIVITY TIMELINE MODE".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "ACTIVITY TIMELINE MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Navigation:"),
                     Line::from("  j / ↓      Move down project list"),
@@ -1053,30 +1251,36 @@ impl App {
                     Line::from("  C          Clear timeline cache"),
                     Line::from("  q / Esc    Return to conversation list"),
                 ]);
-                
+
                 if let Some(ref timeline) = self.activity_timeline {
                     help_text.push(Line::from(""));
                     help_text.push(Line::from(vec![
                         Span::styled("📊 Current: ".to_string(), Style::default().fg(Color::Cyan)),
                         Span::styled(
-                            format!("{} - {} projects, {} conversations", 
+                            format!(
+                                "{} - {} projects, {} conversations",
                                 timeline.config.period.label(),
                                 timeline.projects.len(),
                                 timeline.total_stats.total_conversations
                             ),
-                            Style::default().fg(Color::White)
+                            Style::default().fg(Color::White),
                         ),
                     ]));
                 }
-            },
+            }
 
             AppState::McpServerDashboard => {
                 help_text.push(Line::from(vec![
                     Span::styled("🖥️  ".to_string(), Style::default().fg(Color::Cyan)),
-                    Span::styled("MCP SERVER DASHBOARD MODE".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "MCP SERVER DASHBOARD MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Navigation:"),
                     Line::from("  j / ↓      Move down server list"),
@@ -1103,15 +1307,20 @@ impl App {
                     Line::from("   that extend Claude's capabilities through the"),
                     Line::from("   Model Context Protocol (MCP)."),
                 ]);
-            },
+            }
 
             AppState::Export => {
                 help_text.push(Line::from(vec![
                     Span::styled("📤 ".to_string(), Style::default().fg(Color::Magenta)),
-                    Span::styled("EXPORT MODE".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "EXPORT MODE".to_string(),
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 help_text.push(Line::from(""));
-                
+
                 help_text.extend(vec![
                     Line::from("📍 Format Selection:"),
                     Line::from("  j / ↓      Move down format list"),
@@ -1129,39 +1338,53 @@ impl App {
                     Line::from(""),
                     Line::from("📝 Export includes metadata, timestamps, and tool usage"),
                 ]);
-            },
-            
+            }
+
             AppState::Help => {
                 // This shouldn't happen as we're in help mode, but just in case
                 help_text.push(Line::from("Help is already displayed!"));
-            },
-            
+            }
+
             AppState::Quitting => {
                 help_text.push(Line::from("Application is closing..."));
-            },
+            }
         }
-        
+
         // Universal shortcuts (always available)
         help_text.push(Line::from(""));
         help_text.push(Line::from(vec![
             Span::styled("⚡ ".to_string(), Style::default().fg(Color::Magenta)),
-            Span::styled("UNIVERSAL".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "UNIVERSAL".to_string(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         help_text.push(Line::from("  ? / h      Show this help (any mode)"));
-        
+
         // Performance & features info
         help_text.push(Line::from(""));
         help_text.push(Line::from(vec![
-            Span::styled("✨ Features: ".to_string(), Style::default().fg(Color::Green)),
-            Span::styled("TF-IDF search, syntax highlighting, regex support".to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "✨ Features: ".to_string(),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                "TF-IDF search, syntax highlighting, regex support".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
-        
+
         // Footer
         help_text.push(Line::from(""));
-        help_text.push(Line::from(vec![
-            Span::styled("Press any key to close help".to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-        ]));
-        
+        help_text.push(Line::from(vec![Span::styled(
+            "Press any key to close help".to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )]));
+
         help_text
     }
 
@@ -1227,25 +1450,46 @@ impl App {
 
             // Get visible messages based on scroll position
             let visible_messages = self.get_visible_messages(conversation, area.height as usize);
-            
+
             // Render all visible messages with enhanced formatting and search highlights
             let mut all_lines = Vec::new();
             for (idx, message) in visible_messages.iter().enumerate() {
                 let msg_idx = self.detail_scroll + idx;
-                
-                // Get highlights for this message
-                let msg_highlights: Vec<MatchHighlight> = self.advanced_search_results.iter()
+
+                // Get highlights for this message from global search
+                let mut msg_highlights: Vec<MatchHighlight> = self
+                    .advanced_search_results
+                    .iter()
                     .flat_map(|result| &result.match_highlights)
                     .filter(|highlight| highlight.message_index == msg_idx)
                     .cloned()
                     .collect();
-                
+
+                // Add in-conversation search highlights if in search mode
+                if self.state == AppState::InConversationSearch {
+                    let in_conversation_highlights: Vec<MatchHighlight> = self
+                        .in_conversation_search_matches
+                        .iter()
+                        .filter(|match_info| match_info.message_index == msg_idx)
+                        .map(|match_info| MatchHighlight {
+                            message_index: match_info.message_index,
+                            start: match_info.start_pos,
+                            end: match_info.end_pos,
+                            matched_text: match_info.matched_text.clone(),
+                            highlight_type: HighlightType::InConversationSearch,
+                        })
+                        .collect();
+                    
+                    msg_highlights.extend(in_conversation_highlights);
+                }
+
                 let rendered_message = if msg_highlights.is_empty() {
                     self.conversation_renderer.render_message(message)
                 } else {
-                    self.conversation_renderer.render_message_with_highlights(message, &msg_highlights)
+                    self.conversation_renderer
+                        .render_message_with_highlights(message, &msg_highlights)
                 };
-                
+
                 all_lines.extend(rendered_message.lines);
             }
 
@@ -1263,11 +1507,15 @@ impl App {
     }
 
     /// Get messages that should be visible based on scroll position and screen height
-    fn get_visible_messages<'a>(&self, conversation: &'a Conversation, screen_height: usize) -> &'a [crate::claude::conversation::ConversationMessage] {
+    fn get_visible_messages<'a>(
+        &self,
+        conversation: &'a Conversation,
+        screen_height: usize,
+    ) -> &'a [crate::claude::conversation::ConversationMessage] {
         let start_idx = self.detail_scroll;
         let max_messages = (screen_height / 10).max(1); // Estimate ~10 lines per message
         let end_idx = (start_idx + max_messages).min(conversation.messages.len());
-        
+
         &conversation.messages[start_idx..end_idx]
     }
 
@@ -1279,6 +1527,7 @@ impl App {
             AppState::ConversationList => "Help - Conversation List",
             AppState::ConversationDetail => "Help - Conversation Detail",
             AppState::Search => "Help - Search Mode",
+            AppState::InConversationSearch => "Help - In-Conversation Search",
             AppState::Analytics => "Help - Analytics Dashboard",
             AppState::Timeline => "Help - Activity Timeline",
             AppState::Export => "Help - Export Mode",
@@ -1304,69 +1553,92 @@ impl App {
     /// Render export overlay
     fn render_export_overlay(&mut self, frame: &mut Frame, area: Rect) {
         let mut export_text = Vec::new();
-        
+
         // Header
         export_text.push(Line::from(vec![
             Span::styled("📤 ", Style::default().fg(Color::Magenta)),
-            Span::styled("Export Conversation", 
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Export Conversation",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         export_text.push(Line::from(""));
-        
+
         if let Some(ref conversation) = self.selected_conversation {
             export_text.push(Line::from(vec![
                 Span::styled("Conversation: ", Style::default().fg(Color::White)),
                 Span::styled(
-                    format!("{} ({} messages)", 
+                    format!(
+                        "{} ({} messages)",
                         conversation.session_id.chars().take(12).collect::<String>(),
                         conversation.messages.len()
                     ),
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Cyan),
                 ),
             ]));
             export_text.push(Line::from(""));
         }
-        
+
         export_text.push(Line::from("Select export format:"));
         export_text.push(Line::from(""));
-        
+
         // Format options
         for (i, format) in self.export_formats.iter().enumerate() {
             let (name, description, available) = match format {
                 ExportFormat::Markdown => ("Markdown", "Human-readable text with formatting", true),
-                ExportFormat::Html => ("HTML", "Web page with styling and syntax highlighting", true),
+                ExportFormat::Html => (
+                    "HTML",
+                    "Web page with styling and syntax highlighting",
+                    true,
+                ),
                 ExportFormat::Json => ("JSON", "Structured data for programmatic processing", true),
-                ExportFormat::Pdf => ("PDF", "Print-ready document (external tool required)", false),
+                ExportFormat::Pdf => (
+                    "PDF",
+                    "Print-ready document (external tool required)",
+                    false,
+                ),
             };
-            
+
             let style = if i == self.export_format_index {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::REVERSED)
             } else if available {
                 Style::default().fg(Color::White)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            
-            let prefix = if i == self.export_format_index { "► " } else { "  " };
+
+            let prefix = if i == self.export_format_index {
+                "► "
+            } else {
+                "  "
+            };
             let status = if available { "" } else { " (Not Available)" };
-            
+
             export_text.push(Line::from(vec![
                 Span::styled(format!("{}{}", prefix, name), style),
                 Span::styled(status, Style::default().fg(Color::Red)),
             ]));
-            export_text.push(Line::from(vec![
-                Span::styled(format!("    {}", description), Style::default().fg(Color::DarkGray)),
-            ]));
+            export_text.push(Line::from(vec![Span::styled(
+                format!("    {}", description),
+                Style::default().fg(Color::DarkGray),
+            )]));
             export_text.push(Line::from(""));
         }
-        
+
         // Instructions
         export_text.push(Line::from(""));
         export_text.push(Line::from(vec![
             Span::styled("Controls: ", Style::default().fg(Color::Blue)),
-            Span::styled("j/k = navigate, Enter = export, q = cancel", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "j/k = navigate, Enter = export, q = cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
-        
+
         let block = Block::default()
             .title("Export Conversation")
             .borders(Borders::ALL)
@@ -1385,8 +1657,19 @@ impl App {
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect) {
         let mut status_text = match self.state {
             AppState::ConversationList => "Press ? for help, / to search, a for analytics, t for timeline, m for MCP servers, q to quit".to_string(),
-            AppState::ConversationDetail => "Press q to go back, j/k to scroll, e to export".to_string(),
+            AppState::ConversationDetail => "Press q to go back, j/k to scroll, e to export, / or Ctrl+F to search".to_string(),
             AppState::Search => format!("Search: {}_", self.search_query),
+            AppState::InConversationSearch => {
+                let match_info = if self.in_conversation_search_matches.is_empty() {
+                    "No matches".to_string()
+                } else {
+                    format!("Match {} of {}", 
+                        self.in_conversation_match_index + 1, 
+                        self.in_conversation_search_matches.len())
+                };
+                format!("In-conversation search: {}_ • {} • Ctrl+N/P: navigate, Esc: exit", 
+                    self.in_conversation_search_query, match_info)
+            },
             AppState::Analytics => "Press j/k to scroll, e to export, r to refresh, q to go back".to_string(),
             AppState::Timeline => {
                 let cache_status = if self.timeline_cache.is_some() { " • Cache enabled" } else { "" };
@@ -1441,11 +1724,80 @@ impl App {
         frame.render_widget(search_paragraph, search_area);
     }
 
+    /// Render in-conversation search input overlay
+    fn render_in_conversation_search_input(&mut self, frame: &mut Frame, area: Rect) {
+        // Create a centered search input at the bottom of the screen
+        let search_width = area.width.min(80);
+        let search_x = (area.width - search_width) / 2;
+        let search_y = area.height.saturating_sub(5);
+        
+        let search_area = Rect {
+            x: search_x,
+            y: search_y,
+            width: search_width,
+            height: 3,
+        };
+
+        // Clear the area behind the search input
+        frame.render_widget(Clear, search_area);
+
+        // Create the search input content
+        let match_info = if self.in_conversation_search_matches.is_empty() {
+            if self.in_conversation_search_query.is_empty() {
+                "Type to search within this conversation...".to_string()
+            } else {
+                "No matches found".to_string()
+            }
+        } else {
+            format!("Match {} of {}", 
+                self.in_conversation_match_index + 1, 
+                self.in_conversation_search_matches.len())
+        };
+
+        let search_mode_indicator = match self.in_conversation_search_mode {
+            InConversationSearchMode::Text => "TEXT",
+            InConversationSearchMode::Regex => "REGEX",
+        };
+
+        let search_text = if self.in_conversation_search_query.is_empty() {
+            "_".to_string()
+        } else {
+            format!("{}_", self.in_conversation_search_query)
+        };
+
+        let search_content = vec![
+            Line::from(vec![
+                Span::styled("🔍 In-Conversation Search ", Style::default().fg(Color::Cyan)),
+                Span::styled(format!("[{}]", search_mode_indicator), Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::styled(search_text, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(match_info, Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::styled("Ctrl+N/P: navigate • Esc: exit", Style::default().fg(Color::Blue)),
+            ]),
+        ];
+
+        let search_paragraph = Paragraph::new(search_content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title("Search")
+                    .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            )
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(search_paragraph, search_area);
+    }
+
     /// Start analytics mode
     fn start_analytics(&mut self) {
         self.state = AppState::Analytics;
         self.analytics_scroll = 0;
-        
+
         // Generate analytics if not cached
         if self.analytics_data.is_none() {
             if let Err(e) = self.generate_analytics() {
@@ -1460,13 +1812,13 @@ impl App {
         if self.analytics_engine.is_none() {
             self.analytics_engine = Some(AnalyticsEngine::new(self.conversations.clone()));
         }
-        
+
         if let Some(ref mut engine) = self.analytics_engine {
             let analytics = engine.generate_analytics()?;
             self.analytics_data = Some(analytics.clone());
             self.status_message = Some("Analytics generated successfully".to_string());
         }
-        
+
         Ok(())
     }
 
@@ -1486,18 +1838,16 @@ impl App {
         if let Some(ref analytics) = self.analytics_data {
             let timestamp = analytics.generated_at.format("%Y%m%d_%H%M%S");
             let filename = format!("claude_analytics_{}.json", timestamp);
-            
+
             match serde_json::to_string_pretty(analytics) {
-                Ok(json_data) => {
-                    match std::fs::write(&filename, json_data) {
-                        Ok(_) => {
-                            self.status_message = Some(format!("Analytics exported to {}", filename));
-                        }
-                        Err(e) => {
-                            self.error_message = Some(format!("Export error: {}", e));
-                        }
+                Ok(json_data) => match std::fs::write(&filename, json_data) {
+                    Ok(_) => {
+                        self.status_message = Some(format!("Analytics exported to {}", filename));
                     }
-                }
+                    Err(e) => {
+                        self.error_message = Some(format!("Export error: {}", e));
+                    }
+                },
                 Err(e) => {
                     self.error_message = Some(format!("JSON error: {}", e));
                 }
@@ -1512,7 +1862,7 @@ impl App {
         self.state = AppState::Timeline;
         self.timeline_scroll = 0;
         self.timeline_project_index = 0;
-        
+
         // Generate timeline if not cached
         if self.activity_timeline.is_none() {
             if let Err(e) = self.generate_timeline() {
@@ -1527,7 +1877,7 @@ impl App {
         // Try to load from cache first
         if let Some(ref cache) = self.timeline_cache {
             let conversations_dir = self.parser.projects_dir();
-            
+
             match cache.load_timeline(&self.timeline_config, &conversations_dir) {
                 Ok(Some(cached_timeline)) => {
                     // Use cached timeline
@@ -1552,30 +1902,32 @@ impl App {
         } else {
             self.timeline_loading = true;
         }
-        
+
         // Generate new timeline
         let timeline = ActivityTimeline::create_filtered_timeline(
             self.conversations.clone(),
             self.timeline_config.clone(),
         );
-        
+
         // Save to cache
         if let Some(ref cache) = self.timeline_cache {
             let conversations_dir = self.parser.projects_dir();
-            if let Err(e) = cache.save_timeline(&timeline, &conversations_dir, self.conversations.len()) {
+            if let Err(e) =
+                cache.save_timeline(&timeline, &conversations_dir, self.conversations.len())
+            {
                 // Don't fail if cache save fails - just log it
                 self.error_message = Some(format!("Cache save failed: {}", e));
             }
         }
-        
+
         // Extract project names for navigation
         self.timeline_projects = timeline.projects.keys().cloned().collect();
         self.timeline_projects.sort();
-        
+
         self.activity_timeline = Some(timeline);
         self.status_message = Some("Timeline generated successfully".to_string());
         self.timeline_loading = false;
-        
+
         Ok(())
     }
 
@@ -1585,28 +1937,30 @@ impl App {
         self.timeline_projects.clear();
         self.timeline_expanded_projects.clear();
         self.timeline_project_index = 0;
-        
+
         // Generate new timeline without checking cache
         self.status_message = Some("Regenerating timeline...".to_string());
         self.timeline_loading = true;
-        
+
         let timeline = ActivityTimeline::create_filtered_timeline(
             self.conversations.clone(),
             self.timeline_config.clone(),
         );
-        
+
         // Save to cache
         if let Some(ref cache) = self.timeline_cache {
             let conversations_dir = self.parser.projects_dir();
-            if let Err(e) = cache.save_timeline(&timeline, &conversations_dir, self.conversations.len()) {
+            if let Err(e) =
+                cache.save_timeline(&timeline, &conversations_dir, self.conversations.len())
+            {
                 self.error_message = Some(format!("Cache save failed: {}", e));
             }
         }
-        
+
         // Extract project names for navigation
         self.timeline_projects = timeline.projects.keys().cloned().collect();
         self.timeline_projects.sort();
-        
+
         self.activity_timeline = Some(timeline);
         self.status_message = Some("Timeline refreshed successfully".to_string());
         self.timeline_loading = false;
@@ -1654,22 +2008,30 @@ impl App {
                     if !project_conversations.is_empty() {
                         // Filter main conversation list to this project's conversations
                         self.conversations = project_conversations;
-                        
+
                         // Reset list state and select first conversation
                         self.conversation_list_state = ratatui::widgets::ListState::default();
                         if !self.conversations.is_empty() {
                             self.conversation_list_state.select(Some(0));
                         }
-                        
+
                         // Navigate back to conversation list view
                         self.state = AppState::ConversationList;
-                        self.status_message = Some(format!("Showing {} conversations for project: {}", self.conversations.len(), project_path));
+                        self.status_message = Some(format!(
+                            "Showing {} conversations for project: {}",
+                            self.conversations.len(),
+                            project_path
+                        ));
                     } else {
-                        self.error_message = Some(format!("No conversations found for project: {}", project_path));
+                        self.error_message = Some(format!(
+                            "No conversations found for project: {}",
+                            project_path
+                        ));
                     }
                 }
                 Err(e) => {
-                    self.error_message = Some(format!("Error loading project conversations: {}", e));
+                    self.error_message =
+                        Some(format!("Error loading project conversations: {}", e));
                 }
             }
         }
@@ -1681,10 +2043,10 @@ impl App {
         let filled_length = (activity_score * bar_length as f64) as usize;
         let filled_char = "█";
         let empty_char = "░";
-        
+
         let filled_part = filled_char.repeat(filled_length);
         let empty_part = empty_char.repeat(bar_length - filled_length);
-        
+
         format!("[{}{}]", filled_part, empty_part)
     }
 
@@ -1702,7 +2064,7 @@ impl App {
     fn execute_export(&mut self) {
         if let Some(ref conversation) = self.selected_conversation {
             let format = &self.export_formats[self.export_format_index];
-            
+
             // Generate filename
             let extension = match format {
                 ExportFormat::Markdown => "md",
@@ -1710,8 +2072,12 @@ impl App {
                 ExportFormat::Json => "json",
                 ExportFormat::Pdf => "pdf",
             };
-            let filename = format!("conversation_{}.{}", &conversation.session_id[..8], extension);
-            
+            let filename = format!(
+                "conversation_{}.{}",
+                &conversation.session_id[..8],
+                extension
+            );
+
             // Create export config
             let config = ExportConfig {
                 output_path: std::path::PathBuf::from(&filename),
@@ -1728,7 +2094,7 @@ impl App {
             match exporter.export_conversation(conversation) {
                 Ok(result) => {
                     self.status_message = Some(format!(
-                        "Exported to {} ({} bytes, {} messages)", 
+                        "Exported to {} ({} bytes, {} messages)",
                         result.file_path.display(),
                         result.file_size,
                         result.message_count
@@ -1747,123 +2113,234 @@ impl App {
     fn render_analytics_dashboard(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(ref analytics) = self.analytics_data {
             let mut content = Vec::new();
-            
+
             // Header
             content.push(Line::from(vec![
                 Span::styled("📊 ", Style::default().fg(Color::Blue)),
-                Span::styled("Conversation Analytics Dashboard", 
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" (Generated: {})", 
-                    analytics.generated_at.format("%Y-%m-%d %H:%M:%S")),
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Conversation Analytics Dashboard",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        " (Generated: {})",
+                        analytics.generated_at.format("%Y-%m-%d %H:%M:%S")
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
             content.push(Line::from(""));
-            
+
             // Basic Statistics Section
-            content.push(Line::from(vec![
-                Span::styled("📈 Basic Statistics", 
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                "📈 Basic Statistics",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             let stats = &analytics.basic_stats;
-            content.push(Line::from(format!("   Total conversations: {}", stats.total_conversations)));
-            content.push(Line::from(format!("   Total messages: {}", stats.total_messages)));
-            content.push(Line::from(format!("   User messages: {}", stats.total_user_messages)));
-            content.push(Line::from(format!("   Assistant messages: {}", stats.total_assistant_messages)));
-            content.push(Line::from(format!("   System messages: {}", stats.total_system_messages)));
-            content.push(Line::from(format!("   Tool uses: {}", stats.total_tool_uses)));
-            content.push(Line::from(format!("   Avg. messages per conversation: {:.1}", stats.average_messages_per_conversation)));
-            
+            content.push(Line::from(format!(
+                "   Total conversations: {}",
+                stats.total_conversations
+            )));
+            content.push(Line::from(format!(
+                "   Total messages: {}",
+                stats.total_messages
+            )));
+            content.push(Line::from(format!(
+                "   User messages: {}",
+                stats.total_user_messages
+            )));
+            content.push(Line::from(format!(
+                "   Assistant messages: {}",
+                stats.total_assistant_messages
+            )));
+            content.push(Line::from(format!(
+                "   System messages: {}",
+                stats.total_system_messages
+            )));
+            content.push(Line::from(format!(
+                "   Tool uses: {}",
+                stats.total_tool_uses
+            )));
+            content.push(Line::from(format!(
+                "   Avg. messages per conversation: {:.1}",
+                stats.average_messages_per_conversation
+            )));
+
             if let Some(earliest) = &stats.date_range.earliest {
-                content.push(Line::from(format!("   First conversation: {}", earliest.format("%Y-%m-%d"))));
+                content.push(Line::from(format!(
+                    "   First conversation: {}",
+                    earliest.format("%Y-%m-%d")
+                )));
             }
             if let Some(latest) = &stats.date_range.latest {
-                content.push(Line::from(format!("   Latest conversation: {}", latest.format("%Y-%m-%d"))));
+                content.push(Line::from(format!(
+                    "   Latest conversation: {}",
+                    latest.format("%Y-%m-%d")
+                )));
             }
             if let Some(span) = stats.date_range.span_days {
                 content.push(Line::from(format!("   Activity span: {} days", span)));
             }
             content.push(Line::from(""));
-            
+
             // Top Models Section
-            content.push(Line::from(vec![
-                Span::styled("🤖 Top Models", 
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            ]));
-            for (i, model) in analytics.model_analytics.top_models.iter().take(5).enumerate() {
-                content.push(Line::from(format!("   {}. {} - {} uses ({:.1}%)", 
-                    i + 1, model.model_name, model.usage_count, model.percentage)));
+            content.push(Line::from(vec![Span::styled(
+                "🤖 Top Models",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for (i, model) in analytics
+                .model_analytics
+                .top_models
+                .iter()
+                .take(5)
+                .enumerate()
+            {
+                content.push(Line::from(format!(
+                    "   {}. {} - {} uses ({:.1}%)",
+                    i + 1,
+                    model.model_name,
+                    model.usage_count,
+                    model.percentage
+                )));
             }
             content.push(Line::from(""));
-            
+
             // Top Tools Section
-            content.push(Line::from(vec![
-                Span::styled("🛠️  Top Tools", 
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            ]));
-            for (i, tool) in analytics.tool_analytics.top_tools.iter().take(5).enumerate() {
-                content.push(Line::from(format!("   {}. {} - {} uses ({:.1}%)", 
-                    i + 1, tool.tool_name, tool.usage_count, tool.percentage)));
+            content.push(Line::from(vec![Span::styled(
+                "🛠️  Top Tools",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for (i, tool) in analytics
+                .tool_analytics
+                .top_tools
+                .iter()
+                .take(5)
+                .enumerate()
+            {
+                content.push(Line::from(format!(
+                    "   {}. {} - {} uses ({:.1}%)",
+                    i + 1,
+                    tool.tool_name,
+                    tool.usage_count,
+                    tool.percentage
+                )));
             }
             content.push(Line::from(""));
-            
+
             // Top Projects Section
-            content.push(Line::from(vec![
-                Span::styled("📁 Top Projects", 
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            ]));
-            for (i, project) in analytics.project_analytics.top_projects.iter().take(5).enumerate() {
-                content.push(Line::from(format!("   {}. {} - {} conversations ({:.1}%)", 
-                    i + 1, project.project_name, project.conversation_count, project.percentage)));
+            content.push(Line::from(vec![Span::styled(
+                "📁 Top Projects",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            for (i, project) in analytics
+                .project_analytics
+                .top_projects
+                .iter()
+                .take(5)
+                .enumerate()
+            {
+                content.push(Line::from(format!(
+                    "   {}. {} - {} conversations ({:.1}%)",
+                    i + 1,
+                    project.project_name,
+                    project.conversation_count,
+                    project.percentage
+                )));
             }
             content.push(Line::from(""));
-            
+
             // Temporal Analysis Section
-            content.push(Line::from(vec![
-                Span::styled("🕒 Peak Usage Hours", 
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                "🕒 Peak Usage Hours",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )]));
             for peak in analytics.temporal_analysis.peak_usage_hours.iter().take(3) {
-                content.push(Line::from(format!("   {}:00 - {} conversations ({:.1}%)", 
-                    peak.hour, peak.count, peak.percentage)));
+                content.push(Line::from(format!(
+                    "   {}:00 - {} conversations ({:.1}%)",
+                    peak.hour, peak.count, peak.percentage
+                )));
             }
             content.push(Line::from(""));
-            
+
             // Quality Metrics Section
-            content.push(Line::from(vec![
-                Span::styled("📊 Quality Metrics", 
-                    Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                "📊 Quality Metrics",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             let quality = &analytics.quality_metrics;
             if let Some(avg_duration) = quality.average_conversation_duration {
-                content.push(Line::from(format!("   Average conversation duration: {:.1} minutes", avg_duration)));
+                content.push(Line::from(format!(
+                    "   Average conversation duration: {:.1} minutes",
+                    avg_duration
+                )));
             }
-            content.push(Line::from(format!("   Average turns per conversation: {:.1}", quality.average_turns_per_conversation)));
-            content.push(Line::from(format!("   Completion rate: {:.1}%", quality.completion_rate)));
-            
+            content.push(Line::from(format!(
+                "   Average turns per conversation: {:.1}",
+                quality.average_turns_per_conversation
+            )));
+            content.push(Line::from(format!(
+                "   Completion rate: {:.1}%",
+                quality.completion_rate
+            )));
+
             let msg_dist = &quality.message_length_distribution;
-            content.push(Line::from(format!("   Avg. message length: {:.0} characters", msg_dist.mean)));
-            content.push(Line::from(format!("   Median message length: {} characters", msg_dist.median)));
+            content.push(Line::from(format!(
+                "   Avg. message length: {:.0} characters",
+                msg_dist.mean
+            )));
+            content.push(Line::from(format!(
+                "   Median message length: {} characters",
+                msg_dist.median
+            )));
             content.push(Line::from(""));
-            
+
             // Conversation Length Distribution
-            content.push(Line::from(vec![
-                Span::styled("📈 Conversation Length Distribution", 
-                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-            ]));
+            content.push(Line::from(vec![Span::styled(
+                "📈 Conversation Length Distribution",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             let conv_dist = &analytics.basic_stats.conversation_length_distribution;
-            content.push(Line::from(format!("   Shortest: {} messages", conv_dist.min)));
-            content.push(Line::from(format!("   Longest: {} messages", conv_dist.max)));
-            content.push(Line::from(format!("   Average: {:.1} messages", conv_dist.mean)));
-            content.push(Line::from(format!("   Median: {} messages", conv_dist.median)));
+            content.push(Line::from(format!(
+                "   Shortest: {} messages",
+                conv_dist.min
+            )));
+            content.push(Line::from(format!(
+                "   Longest: {} messages",
+                conv_dist.max
+            )));
+            content.push(Line::from(format!(
+                "   Average: {:.1} messages",
+                conv_dist.mean
+            )));
+            content.push(Line::from(format!(
+                "   Median: {} messages",
+                conv_dist.median
+            )));
             content.push(Line::from(""));
-            
+
             // Controls
             content.push(Line::from(vec![
                 Span::styled("⌨️  Controls: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("j/k=scroll, g/G=top/bottom, e=export, r=refresh, q=back", 
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "j/k=scroll, g/G=top/bottom, e=export, r=refresh, q=back",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
-            
+
             // Apply scrolling by slicing content
             let max_lines = area.height.saturating_sub(2) as usize; // Account for borders
             let visible_content = if self.analytics_scroll >= content.len() {
@@ -1872,7 +2349,7 @@ impl App {
                 let end_idx = (self.analytics_scroll + max_lines).min(content.len());
                 content[self.analytics_scroll..end_idx].to_vec()
             };
-            
+
             let paragraph = Paragraph::new(visible_content)
                 .block(
                     Block::default()
@@ -1881,21 +2358,25 @@ impl App {
                         .style(Style::default().fg(Color::White)),
                 )
                 .wrap(Wrap { trim: false });
-            
+
             frame.render_widget(paragraph, area);
         } else {
             // Show loading or error state
             let error_text = vec![
                 Line::from(vec![
                     Span::styled("⚠️ ", Style::default().fg(Color::Yellow)),
-                    Span::styled("No analytics data available", 
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "No analytics data available",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from("Press 'r' to generate analytics data"),
                 Line::from("Press 'q' to return to conversation list"),
             ];
-            
+
             let paragraph = Paragraph::new(error_text)
                 .block(
                     Block::default()
@@ -1904,7 +2385,7 @@ impl App {
                         .style(Style::default().fg(Color::White)),
                 )
                 .wrap(Wrap { trim: false });
-            
+
             frame.render_widget(paragraph, area);
         }
     }
@@ -1916,14 +2397,22 @@ impl App {
             let loading_content = vec![
                 Line::from(vec![
                     Span::styled("🕐 ", Style::default().fg(Color::Magenta)),
-                    Span::styled("Activity Timeline Dashboard", 
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Activity Timeline Dashboard",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("⏳ ", Style::default().fg(Color::Yellow)),
-                    Span::styled("Generating timeline data...", 
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Generating timeline data...",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from("This may take a moment for large conversation datasets."),
@@ -1931,46 +2420,71 @@ impl App {
                 Line::from(""),
                 Line::from("Press 'q' to cancel and return to conversation list."),
             ];
-            
+
             let paragraph = Paragraph::new(loading_content)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title("Timeline Dashboard")
-                    .border_style(Style::default().fg(Color::Magenta)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Timeline Dashboard")
+                        .border_style(Style::default().fg(Color::Magenta)),
+                )
                 .wrap(Wrap { trim: true });
-            
+
             frame.render_widget(paragraph, area);
             return;
         }
-        
+
         if let Some(ref timeline) = self.activity_timeline {
             let mut content = Vec::new();
-            
+
             // Header with configuration info
             content.push(Line::from(vec![
                 Span::styled("🕐 ", Style::default().fg(Color::Magenta)),
-                Span::styled("Activity Timeline Dashboard", 
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" ({})", timeline.config.period.label()),
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Activity Timeline Dashboard",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({})", timeline.config.period.label()),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
             content.push(Line::from(""));
-            
+
             // Timeline stats with cache info
             content.push(Line::from(vec![
-                Span::styled("📊 Timeline Statistics", 
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" (Generated: {})", 
-                    timeline.generated_at.format("%H:%M:%S")),
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "📊 Timeline Statistics",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" (Generated: {})", timeline.generated_at.format("%H:%M:%S")),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
-            content.push(Line::from(format!("   Total projects: {}", timeline.projects.len())));
-            content.push(Line::from(format!("   Total conversations: {}", timeline.total_stats.total_conversations)));
-            content.push(Line::from(format!("   Total messages: {}", timeline.total_stats.total_messages)));
+            content.push(Line::from(format!(
+                "   Total projects: {}",
+                timeline.projects.len()
+            )));
+            content.push(Line::from(format!(
+                "   Total conversations: {}",
+                timeline.total_stats.total_conversations
+            )));
+            content.push(Line::from(format!(
+                "   Total messages: {}",
+                timeline.total_stats.total_messages
+            )));
             if let Some(peak_day) = timeline.total_stats.peak_activity_day {
-                content.push(Line::from(format!("   Peak activity day: {}", peak_day.format("%Y-%m-%d"))));
+                content.push(Line::from(format!(
+                    "   Peak activity day: {}",
+                    peak_day.format("%Y-%m-%d")
+                )));
             }
-            
+
             // Cache status indicator
             if self.timeline_cache.is_some() {
                 content.push(Line::from(vec![
@@ -1980,58 +2494,88 @@ impl App {
                 ]));
             }
             content.push(Line::from(""));
-            
+
             // Project listing with navigation indicators
             content.push(Line::from(vec![
-                Span::styled("📁 Projects", 
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(" (use j/k to navigate, Enter/Tab to expand)", 
-                    Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "📁 Projects",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " (use j/k to navigate, Enter/Tab to expand)",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
             content.push(Line::from(""));
-            
+
             // Display projects
             for (index, project_name) in self.timeline_projects.iter().enumerate() {
                 let is_selected = index == self.timeline_project_index;
                 let is_expanded = self.timeline_expanded_projects.contains(project_name);
-                
+
                 if let Some(project_activity) = timeline.projects.get(project_name) {
                     // Project header
                     let prefix = if is_selected { "► " } else { "  " };
                     let expand_indicator = if is_expanded { "▼" } else { "▶" };
-                    
+
                     let project_line = Line::from(vec![
-                        Span::styled(prefix, 
-                            if is_selected { Style::default().fg(Color::Yellow) } else { Style::default() }),
-                        Span::styled(format!("{} ", expand_indicator), 
-                            Style::default().fg(Color::Blue)),
-                        Span::styled(project_name.clone(), 
-                            if is_selected { 
-                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) 
-                            } else { 
-                                Style::default().fg(Color::White) 
-                            }),
-                        Span::styled(format!(" ({} conversations)", project_activity.conversations.len()),
-                            Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            prefix,
+                            if is_selected {
+                                Style::default().fg(Color::Yellow)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                        Span::styled(
+                            format!("{} ", expand_indicator),
+                            Style::default().fg(Color::Blue),
+                        ),
+                        Span::styled(
+                            project_name.clone(),
+                            if is_selected {
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::White)
+                            },
+                        ),
+                        Span::styled(
+                            format!(" ({} conversations)", project_activity.conversations.len()),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]);
                     content.push(project_line);
-                    
+
                     // Show expanded content
                     if is_expanded {
                         // Activity metrics with visual indicators
-                        let activity_bar = Self::create_activity_bar(project_activity.stats.activity_score);
+                        let activity_bar =
+                            Self::create_activity_bar(project_activity.stats.activity_score);
                         let trend_icon = match project_activity.indicators.trend {
                             ActivityTrend::Increasing => "📈",
-                            ActivityTrend::Stable => "📊", 
+                            ActivityTrend::Stable => "📊",
                             ActivityTrend::Decreasing => "📉",
                             ActivityTrend::NoData => "❓",
                         };
-                        
+
                         content.push(Line::from(vec![
                             Span::styled("    📊 Activity: ", Style::default().fg(Color::Cyan)),
-                            Span::styled(format!("{} messages ", project_activity.stats.total_messages), Style::default().fg(Color::White)),
+                            Span::styled(
+                                format!("{} messages ", project_activity.stats.total_messages),
+                                Style::default().fg(Color::White),
+                            ),
                             Span::styled(activity_bar, Style::default().fg(Color::Green)),
-                            Span::styled(format!(" {}%", (project_activity.stats.activity_score * 100.0) as u32), Style::default().fg(Color::Green)),
+                            Span::styled(
+                                format!(
+                                    " {}%",
+                                    (project_activity.stats.activity_score * 100.0) as u32
+                                ),
+                                Style::default().fg(Color::Green),
+                            ),
                             Span::styled(format!(" {}", trend_icon), Style::default()),
                         ]));
 
@@ -2040,129 +2584,206 @@ impl App {
                             let rank_style = match &project_activity.indicators.ranking_indicator {
                                 RankingIndicator::Top { .. } => Style::default().fg(Color::Yellow),
                                 RankingIndicator::Middle { .. } => Style::default().fg(Color::Cyan),
-                                RankingIndicator::Bottom { .. } => Style::default().fg(Color::DarkGray),
+                                RankingIndicator::Bottom { .. } => {
+                                    Style::default().fg(Color::DarkGray)
+                                }
                                 RankingIndicator::Unranked => Style::default().fg(Color::DarkGray),
                             };
                             content.push(Line::from(vec![
                                 Span::styled("    🏆 Rank: ", Style::default().fg(Color::Yellow)),
-                                Span::styled(format!("#{} ", rank), rank_style.add_modifier(Modifier::BOLD)),
-                                Span::styled(format!("({:.1} msg/day, {:.1} conv/day)", 
-                                    project_activity.stats.message_frequency,
-                                    project_activity.stats.conversation_frequency), 
-                                    Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    format!("#{} ", rank),
+                                    rank_style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!(
+                                        "({:.1} msg/day, {:.1} conv/day)",
+                                        project_activity.stats.message_frequency,
+                                        project_activity.stats.conversation_frequency
+                                    ),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
                             ]));
                         }
 
-                        // Message breakdown with visual segments  
-                        let user_msgs = project_activity.stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0);
-                        let assistant_msgs = project_activity.stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0);
+                        // Message breakdown with visual segments
+                        let user_msgs = project_activity
+                            .stats
+                            .messages_by_role
+                            .get(&MessageRole::User)
+                            .unwrap_or(&0);
+                        let assistant_msgs = project_activity
+                            .stats
+                            .messages_by_role
+                            .get(&MessageRole::Assistant)
+                            .unwrap_or(&0);
                         content.push(Line::from(vec![
                             Span::styled("    💬 Messages: ", Style::default().fg(Color::Blue)),
-                            Span::styled(format!("{}👤 ", user_msgs), Style::default().fg(Color::Blue)),
-                            Span::styled(format!("{}🤖 ", assistant_msgs), Style::default().fg(Color::Green)),
-                            Span::styled(format!("(ratio {:.1}:1)", project_activity.stats.user_assistant_ratio), Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("{}👤 ", user_msgs),
+                                Style::default().fg(Color::Blue),
+                            ),
+                            Span::styled(
+                                format!("{}🤖 ", assistant_msgs),
+                                Style::default().fg(Color::Green),
+                            ),
+                            Span::styled(
+                                format!(
+                                    "(ratio {:.1}:1)",
+                                    project_activity.stats.user_assistant_ratio
+                                ),
+                                Style::default().fg(Color::DarkGray),
+                            ),
                         ]));
 
                         // Tool usage
                         if !project_activity.stats.top_tools.is_empty() {
-                            let top_tool_names: Vec<String> = project_activity.stats.top_tools.iter()
+                            let top_tool_names: Vec<String> = project_activity
+                                .stats
+                                .top_tools
+                                .iter()
                                 .take(3)
                                 .map(|(name, count)| format!("{}({})", name, count))
                                 .collect();
                             content.push(Line::from(vec![
-                                Span::styled("    🔧 Top tools: ", Style::default().fg(Color::Yellow)),
-                                Span::styled(top_tool_names.join(", "), Style::default().fg(Color::White)),
+                                Span::styled(
+                                    "    🔧 Top tools: ",
+                                    Style::default().fg(Color::Yellow),
+                                ),
+                                Span::styled(
+                                    top_tool_names.join(", "),
+                                    Style::default().fg(Color::White),
+                                ),
                             ]));
                         }
 
                         // Session duration
                         if let Some(duration) = project_activity.stats.avg_session_duration {
                             content.push(Line::from(vec![
-                                Span::styled("    ⏱️  Avg session: ", Style::default().fg(Color::Magenta)),
-                                Span::styled(format!("{:.0} minutes", duration), Style::default().fg(Color::White)),
+                                Span::styled(
+                                    "    ⏱️  Avg session: ",
+                                    Style::default().fg(Color::Magenta),
+                                ),
+                                Span::styled(
+                                    format!("{:.0} minutes", duration),
+                                    Style::default().fg(Color::White),
+                                ),
                             ]));
                         }
                         if let Some(last_activity) = project_activity.last_activity {
-                            content.push(Line::from(format!("    🕒 Last activity: {}", 
-                                last_activity.format("%Y-%m-%d %H:%M"))));
+                            content.push(Line::from(format!(
+                                "    🕒 Last activity: {}",
+                                last_activity.format("%Y-%m-%d %H:%M")
+                            )));
                         }
-                        
+
                         // Show topical summary
-                        content.push(Line::from(format!("    📝 {}", project_activity.topical_summary.summary_text)));
-                        
+                        content.push(Line::from(format!(
+                            "    📝 {}",
+                            project_activity.topical_summary.summary_text
+                        )));
+
                         // Show key topics
                         if !project_activity.topical_summary.main_topics.is_empty() {
-                            let topic_names: Vec<String> = project_activity.topical_summary.main_topics.iter()
+                            let topic_names: Vec<String> = project_activity
+                                .topical_summary
+                                .main_topics
+                                .iter()
                                 .take(3)
                                 .map(|t| t.name.clone())
                                 .collect();
-                            content.push(Line::from(format!("    🔖 Key topics: {}", 
-                                topic_names.join(", "))));
+                            content.push(Line::from(format!(
+                                "    🔖 Key topics: {}",
+                                topic_names.join(", ")
+                            )));
                         }
-                        
+
                         // Recent conversations
                         content.push(Line::from("    📋 Recent conversations:"));
                         for conv in project_activity.conversations.iter().take(3) {
                             let session_short = conv.session_id.chars().take(8).collect::<String>();
-                            content.push(Line::from(format!("      • {} ({} messages) - {}", 
-                                session_short, 
+                            content.push(Line::from(format!(
+                                "      • {} ({} messages) - {}",
+                                session_short,
                                 conv.message_count,
-                                conv.started_at.format("%m/%d %H:%M"))));
+                                conv.started_at.format("%m/%d %H:%M")
+                            )));
                         }
-                        
+
                         if project_activity.conversations.len() > 3 {
-                            content.push(Line::from(format!("      ... and {} more", 
-                                project_activity.conversations.len() - 3)));
+                            content.push(Line::from(format!(
+                                "      ... and {} more",
+                                project_activity.conversations.len() - 3
+                            )));
                         }
                         content.push(Line::from(""));
                     }
                 }
             }
-            
+
             // Controls footer
             content.push(Line::from(""));
-            content.push(Line::from(vec![
-                Span::styled("⌨️  Controls: ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            ]));
-            content.push(Line::from("   j/k: Navigate projects  Enter/Tab: Expand/collapse  r: Refresh"));
-            content.push(Line::from("   1: 24h  2: 48h  7: Week  3: Month  b/d/c: Brief/Detailed/Comprehensive"));
-            content.push(Line::from("   C: Clear cache  q/Esc: Return to conversation list"));
-            
+            content.push(Line::from(vec![Span::styled(
+                "⌨️  Controls: ",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            content.push(Line::from(
+                "   j/k: Navigate projects  Enter/Tab: Expand/collapse  r: Refresh",
+            ));
+            content.push(Line::from(
+                "   1: 24h  2: 48h  7: Week  3: Month  b/d/c: Brief/Detailed/Comprehensive",
+            ));
+            content.push(Line::from(
+                "   C: Clear cache  q/Esc: Return to conversation list",
+            ));
+
             // Create scrollable paragraph
             let paragraph = Paragraph::new(content)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title("Timeline Dashboard")
-                    .border_style(Style::default().fg(Color::Magenta)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Timeline Dashboard")
+                        .border_style(Style::default().fg(Color::Magenta)),
+                )
                 .wrap(Wrap { trim: true })
                 .scroll((self.timeline_scroll as u16, 0));
-            
+
             frame.render_widget(paragraph, area);
         } else {
             // Show loading or empty state
             let empty_content = vec![
                 Line::from(vec![
                     Span::styled("🕐 ", Style::default().fg(Color::Magenta)),
-                    Span::styled("Activity Timeline Dashboard", 
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Activity Timeline Dashboard",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("⏳ ", Style::default().fg(Color::Yellow)),
-                    Span::styled("Generating timeline data...", 
-                        Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "Generating timeline data...",
+                        Style::default().fg(Color::Yellow),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from("Press 'r' to refresh or 'q' to return to conversation list."),
             ];
-            
+
             let paragraph = Paragraph::new(empty_content)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title("Timeline Dashboard")
-                    .border_style(Style::default().fg(Color::Magenta)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Timeline Dashboard")
+                        .border_style(Style::default().fg(Color::Magenta)),
+                )
                 .wrap(Wrap { trim: true });
-            
+
             frame.render_widget(paragraph, area);
         }
     }
@@ -2174,14 +2795,22 @@ impl App {
             let empty_content = vec![
                 Line::from(vec![
                     Span::styled("🖥️  ", Style::default().fg(Color::Cyan)),
-                    Span::styled("MCP Server Dashboard", 
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "MCP Server Dashboard",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("🔍 ", Style::default().fg(Color::Yellow)),
-                    Span::styled("No MCP servers found", 
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "No MCP servers found",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from("💡 Tips to get started:"),
@@ -2196,12 +2825,14 @@ impl App {
                 Line::from("  • Cursor User settings"),
                 Line::from("  • .vscode/ and .cursor/ in current directory"),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled("⌨️  Press 'r' to scan for servers or '?' for help", 
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-                ]),
+                Line::from(vec![Span::styled(
+                    "⌨️  Press 'r' to scan for servers or '?' for help",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )]),
             ];
-            
+
             let paragraph = Paragraph::new(empty_content)
                 .block(
                     Block::default()
@@ -2210,7 +2841,7 @@ impl App {
                         .style(Style::default().fg(Color::White)),
                 )
                 .wrap(Wrap { trim: false });
-            
+
             frame.render_widget(paragraph, area);
             return;
         }
@@ -2223,37 +2854,34 @@ impl App {
 
         // Render server list on the left
         self.render_mcp_server_list(frame, chunks[0]);
-        
+
         // Render server details on the right
         self.render_mcp_server_details(frame, chunks[1]);
     }
 
     /// Render MCP server list
     fn render_mcp_server_list(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.mcp_servers
+        let items: Vec<ListItem> = self
+            .mcp_servers
             .iter()
             .map(|server| {
                 let status_emoji = server.status.emoji();
 
                 let transport_desc = server.transport.description();
                 let capabilities_count = server.capabilities.len();
-                
+
                 let content = format!(
                     "{} {}\n   🚀 {}\n   🛠️  {} capabilities",
-                    status_emoji, 
-                    server.name,
-                    transport_desc,
-                    capabilities_count
+                    status_emoji, server.name, transport_desc, capabilities_count
                 );
 
-                ListItem::new(content)
-                    .style(Style::default().fg(Color::White))
+                ListItem::new(content).style(Style::default().fg(Color::White))
             })
             .collect();
 
         let discovery_info = if let Some(ref result) = self.last_discovery_result {
             format!(
-                "MCP Servers ({}) - Scanned {} paths in {:.2}s", 
+                "MCP Servers ({}) - Scanned {} paths in {:.2}s",
                 result.server_count(),
                 result.scanned_paths.len(),
                 result.scan_duration.as_secs_f64()
@@ -2286,12 +2914,12 @@ impl App {
                 let mut details = Vec::new();
 
                 // Header with server name and status
-                details.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} {}", server.status.emoji(), server.name),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                    ),
-                ]));
+                details.push(Line::from(vec![Span::styled(
+                    format!("{} {}", server.status.emoji(), server.name),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 details.push(Line::from(""));
 
                 // Status information
@@ -2305,7 +2933,7 @@ impl App {
                             ServerStatus::Starting | ServerStatus::Stopping => Color::Yellow,
                             ServerStatus::Error(_) => Color::Red,
                             ServerStatus::Unknown => Color::DarkGray,
-                        })
+                        }),
                     ),
                 ]));
 
@@ -2317,7 +2945,10 @@ impl App {
 
                 details.push(Line::from(vec![
                     Span::styled("Transport: ", Style::default().fg(Color::White)),
-                    Span::styled(server.transport.description(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        server.transport.description(),
+                        Style::default().fg(Color::White),
+                    ),
                 ]));
 
                 if let Some(ref version) = server.version {
@@ -2329,23 +2960,32 @@ impl App {
 
                 details.push(Line::from(vec![
                     Span::styled("Config: ", Style::default().fg(Color::White)),
-                    Span::styled(server.config_path.display().to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        server.config_path.display().to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
 
                 if let Some(ref description) = server.description {
                     details.push(Line::from(""));
-                    details.push(Line::from(vec![
-                        Span::styled("Description:", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                    ]));
+                    details.push(Line::from(vec![Span::styled(
+                        "Description:",
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
                     details.push(Line::from(description.clone()));
                 }
 
                 // Capabilities
                 if !server.capabilities.is_empty() {
                     details.push(Line::from(""));
-                    details.push(Line::from(vec![
-                        Span::styled("Capabilities:", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    ]));
+                    details.push(Line::from(vec![Span::styled(
+                        "Capabilities:",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
                     for capability in &server.capabilities {
                         details.push(Line::from(format!(
                             "  🛠️  {} - {}",
@@ -2362,7 +3002,7 @@ impl App {
                         Span::styled("Last Health Check: ", Style::default().fg(Color::White)),
                         Span::styled(
                             last_check.format("%Y-%m-%d %H:%M:%S").to_string(),
-                            Style::default().fg(Color::DarkGray)
+                            Style::default().fg(Color::DarkGray),
                         ),
                     ]));
                 }
@@ -2370,9 +3010,10 @@ impl App {
                 // Error details if present
                 if let ServerStatus::Error(ref error) = server.status {
                     details.push(Line::from(""));
-                    details.push(Line::from(vec![
-                        Span::styled("Error Details:", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    ]));
+                    details.push(Line::from(vec![Span::styled(
+                        "Error Details:",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )]));
                     details.push(Line::from(error.clone()));
                 }
 
@@ -2380,9 +3021,12 @@ impl App {
                 if let Some(ref result) = self.last_discovery_result {
                     if !result.errors.is_empty() {
                         details.push(Line::from(""));
-                        details.push(Line::from(vec![
-                            Span::styled("Discovery Warnings:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                        ]));
+                        details.push(Line::from(vec![Span::styled(
+                            "Discovery Warnings:",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )]));
                         for error in result.errors.iter().take(3) {
                             details.push(Line::from(format!(
                                 "  ⚠️  {}: {}",
@@ -2401,10 +3045,10 @@ impl App {
 
                 // Instructions
                 details.push(Line::from(""));
-                details.push(Line::from(vec![
-                    Span::styled("⌨️  j/k=navigate, r=refresh, d=health check, ?=help", 
-                        Style::default().fg(Color::DarkGray)),
-                ]));
+                details.push(Line::from(vec![Span::styled(
+                    "⌨️  j/k=navigate, r=refresh, d=health check, ?=help",
+                    Style::default().fg(Color::DarkGray),
+                )]));
 
                 let paragraph = Paragraph::new(details)
                     .block(
@@ -2440,6 +3084,156 @@ impl App {
             .wrap(Wrap { trim: false });
 
         frame.render_widget(paragraph, area);
+    }
+
+    /// Execute in-conversation search
+    fn execute_in_conversation_search(&mut self) {
+        if let Some(conversation) = &self.selected_conversation {
+            if !self.in_conversation_search_query.is_empty() {
+                let mut matches = Vec::new();
+                
+                // Check if query starts with "regex:" for regex mode
+                let (search_text, is_regex) = if self.in_conversation_search_query.starts_with("regex:") {
+                    (self.in_conversation_search_query[6..].to_string(), true)
+                } else {
+                    (self.in_conversation_search_query.clone(), false)
+                };
+                
+                self.in_conversation_search_mode = if is_regex {
+                    InConversationSearchMode::Regex
+                } else {
+                    InConversationSearchMode::Text
+                };
+                
+                // Search through all messages
+                for (msg_index, message) in conversation.messages.iter().enumerate() {
+                    let content = &message.content;
+                    
+                    if is_regex {
+                        // Regex search
+                        if let Ok(regex) = regex::Regex::new(&search_text) {
+                            for mat in regex.find_iter(content) {
+                                let context_start = mat.start().saturating_sub(50);
+                                let context_end = (mat.end() + 50).min(content.len());
+                                let context = self.safe_string_slice(content, context_start, context_end);
+                                
+                                matches.push(InConversationMatch {
+                                    message_index: msg_index,
+                                    start_pos: mat.start(),
+                                    end_pos: mat.end(),
+                                    matched_text: mat.as_str().to_string(),
+                                    context,
+                                });
+                            }
+                        }
+                    } else {
+                        // Text search (case insensitive)
+                        let content_lower = content.to_lowercase();
+                        let search_lower = search_text.to_lowercase();
+                        
+                        let mut start_pos = 0;
+                        while let Some(pos) = content_lower[start_pos..].find(&search_lower) {
+                            let absolute_pos = start_pos + pos;
+                            let context_start = absolute_pos.saturating_sub(50);
+                            let context_end = (absolute_pos + search_text.len() + 50).min(content.len());
+                            let context = self.safe_string_slice(content, context_start, context_end);
+                            
+                            matches.push(InConversationMatch {
+                                message_index: msg_index,
+                                start_pos: absolute_pos,
+                                end_pos: absolute_pos + search_text.len(),
+                                matched_text: content[absolute_pos..absolute_pos + search_text.len()].to_string(),
+                                context,
+                            });
+                            
+                            start_pos = absolute_pos + 1;
+                        }
+                    }
+                }
+                
+                self.in_conversation_search_matches = matches;
+                self.in_conversation_match_index = 0;
+                
+                // Navigate to first match if available
+                if !self.in_conversation_search_matches.is_empty() {
+                    self.scroll_to_match(0);
+                }
+            } else {
+                self.in_conversation_search_matches.clear();
+            }
+        }
+    }
+
+    /// Exit in-conversation search mode
+    fn exit_in_conversation_search(&mut self) {
+        self.in_conversation_search_query.clear();
+        self.in_conversation_search_matches.clear();
+        self.in_conversation_match_index = 0;
+        
+        // Return to previous state
+        if let Some(previous_state) = self.previous_state_before_search.take() {
+            self.state = previous_state;
+        } else {
+            self.state = AppState::ConversationDetail;
+        }
+    }
+
+    /// Navigate to next match
+    fn navigate_to_next_match(&mut self) {
+        if !self.in_conversation_search_matches.is_empty() {
+            self.in_conversation_match_index = 
+                (self.in_conversation_match_index + 1) % self.in_conversation_search_matches.len();
+            self.scroll_to_match(self.in_conversation_match_index);
+        }
+    }
+
+    /// Navigate to previous match
+    fn navigate_to_previous_match(&mut self) {
+        if !self.in_conversation_search_matches.is_empty() {
+            if self.in_conversation_match_index > 0 {
+                self.in_conversation_match_index -= 1;
+            } else {
+                self.in_conversation_match_index = self.in_conversation_search_matches.len() - 1;
+            }
+            self.scroll_to_match(self.in_conversation_match_index);
+        }
+    }
+
+    /// Scroll to a specific match
+    fn scroll_to_match(&mut self, match_index: usize) {
+        if let Some(match_info) = self.in_conversation_search_matches.get(match_index) {
+            self.detail_scroll = match_info.message_index;
+        }
+    }
+
+    /// Safely slice a string at character boundaries, not byte boundaries
+    fn safe_string_slice(&self, content: &str, start: usize, end: usize) -> String {
+        let char_indices: Vec<(usize, char)> = content.char_indices().collect();
+        
+        if char_indices.is_empty() {
+            return String::new();
+        }
+        
+        // Find the closest character boundary for start
+        let safe_start = if start == 0 {
+            0
+        } else {
+            char_indices
+                .iter()
+                .take_while(|(byte_idx, _)| *byte_idx <= start)
+                .last()
+                .map(|(byte_idx, _)| *byte_idx)
+                .unwrap_or(0)
+        };
+        
+        // Find the closest character boundary for end
+        let safe_end = char_indices
+            .iter()
+            .find(|(byte_idx, _)| *byte_idx >= end)
+            .map(|(byte_idx, _)| *byte_idx)
+            .unwrap_or(content.len());
+        
+        content[safe_start..safe_end].to_string()
     }
 }
 

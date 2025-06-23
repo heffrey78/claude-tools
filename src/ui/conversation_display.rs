@@ -1,13 +1,13 @@
 use crate::claude::conversation::{ConversationMessage, MessageRole};
-use crate::claude::search::MatchHighlight;
-use pulldown_cmark::{Parser, Event, Tag, TagEnd, CodeBlockKind, HeadingLevel};
+use crate::claude::search::{HighlightType, MatchHighlight};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
 };
 use syntect::{
     easy::HighlightLines,
-    highlighting::{ThemeSet, Style as SyntectStyle},
+    highlighting::{Style as SyntectStyle, ThemeSet},
     parsing::SyntaxSet,
     util::LinesWithEndings,
 };
@@ -42,9 +42,9 @@ impl ConversationRenderer {
 
     /// Render a complete conversation message with search highlights
     pub fn render_message_with_highlights(
-        &self, 
-        message: &ConversationMessage, 
-        highlights: &[MatchHighlight]
+        &self,
+        message: &ConversationMessage,
+        highlights: &[MatchHighlight],
     ) -> Text<'_> {
         let mut lines = Vec::new();
 
@@ -56,7 +56,8 @@ impl ConversationRenderer {
         lines.push(Line::from(""));
 
         // Render message content with markdown and highlights
-        let content_lines = self.render_markdown_content_with_highlights(&message.content, highlights);
+        let content_lines =
+            self.render_markdown_content_with_highlights(&message.content, highlights);
         lines.extend(content_lines);
 
         // Add tool uses if any
@@ -122,17 +123,18 @@ impl ConversationRenderer {
             Span::raw(" "),
             Span::styled(
                 format!("({})", model_info),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ])
     }
 
-
     /// Render markdown content with search highlights
     fn render_markdown_content_with_highlights(
-        &self, 
-        content: &str, 
-        highlights: &[MatchHighlight]
+        &self,
+        content: &str,
+        highlights: &[MatchHighlight],
     ) -> Vec<Line<'_>> {
         let parser = Parser::new(content);
         let mut lines = Vec::new();
@@ -151,7 +153,7 @@ impl ConversationRenderer {
                     in_code_block = true;
                     code_lang = Some(lang.to_string());
                     code_content.clear();
-                    
+
                     // Finish current line before code block
                     if !current_line.is_empty() {
                         lines.push(Line::from(current_line.clone()));
@@ -160,7 +162,8 @@ impl ConversationRenderer {
                 }
                 Event::End(TagEnd::CodeBlock) => {
                     if in_code_block {
-                        let highlighted_lines = self.highlight_code(&code_content, code_lang.as_deref());
+                        let highlighted_lines =
+                            self.highlight_code(&code_content, code_lang.as_deref());
                         lines.extend(highlighted_lines);
                         in_code_block = false;
                         code_lang = None;
@@ -177,7 +180,7 @@ impl ConversationRenderer {
                         HeadingLevel::H5 => 5,
                         HeadingLevel::H6 => 6,
                     };
-                    
+
                     if !current_line.is_empty() {
                         lines.push(Line::from(current_line.clone()));
                         current_line.clear();
@@ -188,15 +191,13 @@ impl ConversationRenderer {
                     if in_heading {
                         // Add heading prefix and styling
                         let prefix = "#".repeat(heading_level);
-                        let mut heading_line = vec![
-                            Span::styled(
-                                format!("{} ", prefix),
-                                Style::default()
-                                    .fg(Color::Blue)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ];
-                        
+                        let mut heading_line = vec![Span::styled(
+                            format!("{} ", prefix),
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+
                         // Style the heading text
                         for span in current_line.drain(..) {
                             let styled_span = match span.style.fg {
@@ -210,7 +211,7 @@ impl ConversationRenderer {
                             };
                             heading_line.push(styled_span);
                         }
-                        
+
                         lines.push(Line::from(heading_line));
                         lines.push(Line::from("")); // Add space after heading
                         in_heading = false;
@@ -239,10 +240,7 @@ impl ConversationRenderer {
                         lines.push(Line::from(current_line.clone()));
                         current_line.clear();
                     }
-                    current_line.push(Span::styled(
-                        "• ",
-                        Style::default().fg(Color::Yellow),
-                    ));
+                    current_line.push(Span::styled("• ", Style::default().fg(Color::Yellow)));
                 }
                 Event::Text(text) => {
                     if in_code_block {
@@ -254,7 +252,7 @@ impl ConversationRenderer {
                                 lines.push(Line::from(current_line.clone()));
                                 current_line.clear();
                             }
-                            
+
                             let mut style = Style::default().fg(Color::White);
                             if in_strong {
                                 style = style.add_modifier(Modifier::BOLD);
@@ -262,17 +260,16 @@ impl ConversationRenderer {
                             if in_emphasis {
                                 style = style.add_modifier(Modifier::ITALIC);
                             }
-                            
+
                             // Apply search highlights
-                            let highlighted_spans = self.apply_text_highlights(&line_text, highlights, style);
+                            let highlighted_spans =
+                                self.apply_text_highlights(&line_text, highlights, style);
                             current_line.extend(highlighted_spans);
                         }
                     }
                 }
                 Event::Code(code) => {
-                    let style = Style::default()
-                        .fg(Color::Yellow)
-                        .bg(Color::DarkGray);
+                    let style = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
                     current_line.push(Span::styled(format!("`{}`", code), style));
                 }
                 Event::SoftBreak => {
@@ -311,13 +308,12 @@ impl ConversationRenderer {
 
         // Add code block header
         lines.push(Line::from(vec![
-            Span::styled(
-                "```".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("```".to_string(), Style::default().fg(Color::DarkGray)),
             Span::styled(
                 lang.to_string(),
-                Style::default().fg(Color::Blue).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
 
@@ -349,7 +345,10 @@ impl ConversationRenderer {
     }
 
     /// Render tool uses section  
-    fn render_tool_uses(&self, tool_uses: &[crate::claude::conversation::ToolUse]) -> Vec<Line<'static>> {
+    fn render_tool_uses(
+        &self,
+        tool_uses: &[crate::claude::conversation::ToolUse],
+    ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
         lines.push(Line::from(Span::styled(
@@ -362,10 +361,7 @@ impl ConversationRenderer {
         for (i, tool_use) in tool_uses.iter().enumerate() {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}. ", i + 1),
-                    Style::default().fg(Color::Magenta),
-                ),
+                Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Magenta)),
                 Span::styled(
                     tool_use.name.clone(),
                     Style::default()
@@ -386,10 +382,7 @@ impl ConversationRenderer {
             for line_text in wrapped_params {
                 lines.push(Line::from(vec![
                     Span::raw("   ".to_string()),
-                    Span::styled(
-                        line_text,
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(line_text, Style::default().fg(Color::DarkGray)),
                 ]));
             }
         }
@@ -429,31 +422,33 @@ impl ConversationRenderer {
         for highlight in highlights {
             if let Some(start) = text_lower.find(&highlight.matched_text.to_lowercase()) {
                 let end = start + highlight.matched_text.len();
-                text_highlights.push((start, end, &highlight.matched_text));
+                text_highlights.push((start, end, &highlight.matched_text, &highlight.highlight_type));
             }
         }
 
         // Sort highlights by position
-        text_highlights.sort_by_key(|(start, _, _)| *start);
+        text_highlights.sort_by_key(|(start, _, _, _)| *start);
 
         // Build spans with highlights
-        for (start, end, _) in text_highlights {
+        for (start, end, _, highlight_type) in text_highlights {
             // Add text before highlight
             if start > last_end {
-                spans.push(Span::styled(
-                    text[last_end..start].to_owned(),
-                    base_style,
-                ));
+                spans.push(Span::styled(text[last_end..start].to_owned(), base_style));
             }
 
-            // Add highlighted text
-            spans.push(Span::styled(
-                text[start..end].to_owned(),
-                Style::default()
+            // Add highlighted text with different styles based on highlight type
+            let highlight_style = match highlight_type {
+                HighlightType::GlobalSearch => Style::default()
                     .bg(Color::Yellow)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD),
-            ));
+                HighlightType::InConversationSearch => Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            };
+            
+            spans.push(Span::styled(text[start..end].to_owned(), highlight_style));
 
             last_end = end;
         }
@@ -479,8 +474,8 @@ fn syntect_style_to_ratatui_color(style: SyntectStyle) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::claude::conversation::ToolUse;
+    use chrono::Utc;
 
     fn create_test_message() -> ConversationMessage {
         ConversationMessage {
@@ -505,7 +500,7 @@ mod tests {
         let renderer = ConversationRenderer::new(80);
         let message = create_test_message();
         let rendered = renderer.render_message(&message);
-        
+
         // Should have header, content, and separator
         assert!(!rendered.lines.is_empty());
     }

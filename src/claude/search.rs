@@ -1,6 +1,6 @@
 use super::conversation::{Conversation, ConversationMessage};
 use crate::errors::ClaudeToolsError;
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
 use rayon::prelude::*;
 use regex::Regex;
@@ -60,10 +60,42 @@ pub struct ConversationDateEntry {
 pub struct SearchQuery {
     pub text: Option<String>,
     pub regex_pattern: Option<String>,
+    pub boolean_query: Option<BooleanQuery>,
     pub date_range: Option<DateRange>,
     pub project_filter: Option<String>,
+    pub model_filter: Option<String>,
+    pub tool_filter: Option<String>,
+    pub message_role_filter: Option<MessageRole>,
+    pub min_messages: Option<usize>,
+    pub max_messages: Option<usize>,
+    pub min_duration_minutes: Option<u32>,
+    pub max_duration_minutes: Option<u32>,
     pub search_mode: SearchMode,
     pub max_results: Option<usize>,
+}
+
+/// Boolean query representation for complex search logic
+#[derive(Debug, Clone)]
+pub enum BooleanQuery {
+    /// Single search term
+    Term(String),
+    /// AND operation
+    And(Box<BooleanQuery>, Box<BooleanQuery>),
+    /// OR operation
+    Or(Box<BooleanQuery>, Box<BooleanQuery>),
+    /// NOT operation
+    Not(Box<BooleanQuery>),
+    /// Grouped query with parentheses
+    Group(Box<BooleanQuery>),
+}
+
+/// Message role for filtering
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+    Tool,
 }
 
 /// Search modes supported by the engine
@@ -86,6 +118,160 @@ pub struct DateRange {
     pub end: Option<DateTime<Utc>>,
 }
 
+/// Boolean query parser for complex search expressions
+pub struct BooleanQueryParser;
+
+impl BooleanQueryParser {
+    /// Parse a boolean query string into a BooleanQuery AST
+    pub fn parse(input: &str) -> Result<BooleanQuery, ClaudeToolsError> {
+        let tokens = Self::tokenize(input)?;
+        Self::parse_tokens(&tokens, 0).map(|(query, _)| query)
+    }
+
+    /// Tokenize the input string
+    fn tokenize(input: &str) -> Result<Vec<Token>, ClaudeToolsError> {
+        let mut tokens = Vec::new();
+        let mut current_word = String::new();
+        let mut chars = input.chars().peekable();
+        let mut in_quotes = false;
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Term(current_word.clone()));
+                        current_word.clear();
+                    }
+                }
+                ' ' | '\t' | '\n' if !in_quotes => {
+                    if !current_word.is_empty() {
+                        tokens.push(Self::word_to_token(&current_word));
+                        current_word.clear();
+                    }
+                }
+                '(' if !in_quotes => {
+                    if !current_word.is_empty() {
+                        tokens.push(Self::word_to_token(&current_word));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::LeftParen);
+                }
+                ')' if !in_quotes => {
+                    if !current_word.is_empty() {
+                        tokens.push(Self::word_to_token(&current_word));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::RightParen);
+                }
+                _ => current_word.push(ch),
+            }
+        }
+
+        if in_quotes {
+            return Err(ClaudeToolsError::Config(
+                "Unclosed quote in search query".to_string(),
+            ));
+        }
+
+        if !current_word.is_empty() {
+            tokens.push(Self::word_to_token(&current_word));
+        }
+
+        Ok(tokens)
+    }
+
+    /// Convert a word to the appropriate token type
+    fn word_to_token(word: &str) -> Token {
+        match word.to_uppercase().as_str() {
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            "NOT" => Token::Not,
+            _ => Token::Term(word.to_string()),
+        }
+    }
+
+    /// Parse tokens into a boolean query AST
+    fn parse_tokens(
+        tokens: &[Token],
+        mut pos: usize,
+    ) -> Result<(BooleanQuery, usize), ClaudeToolsError> {
+        let (mut left, new_pos) = Self::parse_term(tokens, pos)?;
+        pos = new_pos;
+
+        while pos < tokens.len() {
+            match &tokens[pos] {
+                Token::And => {
+                    pos += 1;
+                    let (right, new_pos) = Self::parse_term(tokens, pos)?;
+                    left = BooleanQuery::And(Box::new(left), Box::new(right));
+                    pos = new_pos;
+                }
+                Token::Or => {
+                    pos += 1;
+                    let (right, new_pos) = Self::parse_term(tokens, pos)?;
+                    left = BooleanQuery::Or(Box::new(left), Box::new(right));
+                    pos = new_pos;
+                }
+                Token::RightParen => break,
+                _ => break,
+            }
+        }
+
+        Ok((left, pos))
+    }
+
+    /// Parse a single term (including NOT and parentheses)
+    fn parse_term(
+        tokens: &[Token],
+        mut pos: usize,
+    ) -> Result<(BooleanQuery, usize), ClaudeToolsError> {
+        if pos >= tokens.len() {
+            return Err(ClaudeToolsError::Config(
+                "Unexpected end of query".to_string(),
+            ));
+        }
+
+        match &tokens[pos] {
+            Token::Not => {
+                pos += 1;
+                let (term, new_pos) = Self::parse_term(tokens, pos)?;
+                Ok((BooleanQuery::Not(Box::new(term)), new_pos))
+            }
+            Token::LeftParen => {
+                pos += 1;
+                let (query, new_pos) = Self::parse_tokens(tokens, pos)?;
+                pos = new_pos;
+                if pos >= tokens.len() || !matches!(tokens[pos], Token::RightParen) {
+                    return Err(ClaudeToolsError::Config(
+                        "Missing closing parenthesis".to_string(),
+                    ));
+                }
+                pos += 1;
+                Ok((BooleanQuery::Group(Box::new(query)), pos))
+            }
+            Token::Term(term) => {
+                pos += 1;
+                Ok((BooleanQuery::Term(term.clone()), pos))
+            }
+            _ => Err(ClaudeToolsError::Config(
+                "Unexpected token in query".to_string(),
+            )),
+        }
+    }
+}
+
+/// Tokens for boolean query parsing
+#[derive(Debug, Clone)]
+enum Token {
+    Term(String),
+    And,
+    Or,
+    Not,
+    LeftParen,
+    RightParen,
+}
+
 /// Search result with relevance scoring and highlights
 #[derive(Debug, Clone)]
 pub struct SearchResult {
@@ -96,6 +282,25 @@ pub struct SearchResult {
     pub matched_messages: Vec<usize>, // Indices of messages that matched
 }
 
+/// Result of boolean query evaluation
+#[derive(Debug, Clone)]
+struct BooleanResult {
+    matches: bool,
+    score: f64,
+    highlights: Vec<MatchHighlight>,
+    match_count: usize,
+    matched_messages: Vec<usize>,
+}
+
+/// Type of highlight to distinguish visual styling
+#[derive(Debug, Clone, PartialEq)]
+pub enum HighlightType {
+    /// Global search across all conversations
+    GlobalSearch,
+    /// Search within a specific conversation
+    InConversationSearch,
+}
+
 /// Highlight information for search result display
 #[derive(Debug, Clone)]
 pub struct MatchHighlight {
@@ -103,6 +308,7 @@ pub struct MatchHighlight {
     pub start: usize,
     pub end: usize,
     pub matched_text: String,
+    pub highlight_type: HighlightType,
 }
 
 impl SearchEngine {
@@ -118,7 +324,10 @@ impl SearchEngine {
     }
 
     /// Build search index from a collection of conversations
-    pub fn build_index(&mut self, conversations: Vec<Conversation>) -> Result<(), ClaudeToolsError> {
+    pub fn build_index(
+        &mut self,
+        conversations: Vec<Conversation>,
+    ) -> Result<(), ClaudeToolsError> {
         // Build inverted index
         for conversation in &conversations {
             self.index_conversation(conversation)?;
@@ -149,7 +358,12 @@ impl SearchEngine {
     }
 
     /// Index a single message
-    fn index_message(&mut self, conversation_id: &str, message_index: usize, message: &ConversationMessage) {
+    fn index_message(
+        &mut self,
+        conversation_id: &str,
+        message_index: usize,
+        message: &ConversationMessage,
+    ) {
         self.index_text(conversation_id, message_index, &message.content);
     }
 
@@ -172,13 +386,16 @@ impl SearchEngine {
                 term_frequency: frequency,
             };
 
-            self.content_index.word_index
+            self.content_index
+                .word_index
                 .entry(word.clone())
                 .or_insert_with(Vec::new)
                 .push(entry);
 
             // Update document frequency
-            *self.content_index.document_frequencies
+            *self
+                .content_index
+                .document_frequencies
                 .entry(word)
                 .or_insert(0) += 1;
         }
@@ -216,14 +433,17 @@ impl SearchEngine {
         // Get candidate conversations based on filters
         let mut candidates = self.get_candidate_conversations(query)?;
 
-        // Apply text/regex search
-        let results = if let Some(ref text) = query.text {
+        // Apply text/regex/boolean search
+        let results = if let Some(ref boolean_query) = query.boolean_query {
+            self.search_boolean_parallel(&mut candidates, boolean_query)?
+        } else if let Some(ref text) = query.text {
             self.search_text_parallel(&mut candidates, text, query.search_mode.clone())?
         } else if let Some(ref pattern) = query.regex_pattern {
             self.search_regex_parallel(&mut candidates, pattern)?
         } else {
             // Just return filtered candidates with default scoring
-            candidates.into_iter()
+            candidates
+                .into_iter()
                 .map(|conv| SearchResult {
                     relevance_score: 1.0,
                     match_highlights: Vec::new(),
@@ -270,7 +490,8 @@ impl SearchEngine {
 
         // Sort by relevance score
         let mut sorted_results = results;
-        sorted_results.par_sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+        sorted_results
+            .par_sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
 
         Ok(sorted_results)
     }
@@ -306,6 +527,7 @@ impl SearchEngine {
                             start: mat.start(),
                             end: mat.end(),
                             matched_text: mat.as_str().to_string(),
+                            highlight_type: HighlightType::GlobalSearch,
                         });
                         match_count += 1;
                     }
@@ -343,6 +565,154 @@ impl SearchEngine {
         Ok(sorted_results)
     }
 
+    /// Parallel boolean search across conversations
+    fn search_boolean_parallel(
+        &self,
+        conversations: &mut [Conversation],
+        boolean_query: &BooleanQuery,
+    ) -> Result<Vec<SearchResult>, ClaudeToolsError> {
+        let results: Vec<SearchResult> = conversations
+            .par_iter()
+            .filter_map(|conv| {
+                let result = self.evaluate_boolean_query(conv, boolean_query);
+                if result.matches {
+                    Some(SearchResult {
+                        conversation: conv.clone(),
+                        relevance_score: result.score,
+                        match_highlights: result.highlights,
+                        match_count: result.match_count,
+                        matched_messages: result.matched_messages,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by relevance score
+        let mut sorted_results = results;
+        sorted_results
+            .par_sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+
+        Ok(sorted_results)
+    }
+
+    /// Evaluate a boolean query against a conversation
+    fn evaluate_boolean_query(
+        &self,
+        conversation: &Conversation,
+        query: &BooleanQuery,
+    ) -> BooleanResult {
+        match query {
+            BooleanQuery::Term(term) => self.evaluate_term(conversation, term),
+            BooleanQuery::And(left, right) => {
+                let left_result = self.evaluate_boolean_query(conversation, left);
+                let right_result = self.evaluate_boolean_query(conversation, right);
+
+                BooleanResult {
+                    matches: left_result.matches && right_result.matches,
+                    score: if left_result.matches && right_result.matches {
+                        left_result.score + right_result.score
+                    } else {
+                        0.0
+                    },
+                    highlights: [left_result.highlights, right_result.highlights].concat(),
+                    match_count: left_result.match_count + right_result.match_count,
+                    matched_messages: [left_result.matched_messages, right_result.matched_messages]
+                        .concat()
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            BooleanQuery::Or(left, right) => {
+                let left_result = self.evaluate_boolean_query(conversation, left);
+                let right_result = self.evaluate_boolean_query(conversation, right);
+
+                BooleanResult {
+                    matches: left_result.matches || right_result.matches,
+                    score: left_result.score + right_result.score,
+                    highlights: [left_result.highlights, right_result.highlights].concat(),
+                    match_count: left_result.match_count + right_result.match_count,
+                    matched_messages: [left_result.matched_messages, right_result.matched_messages]
+                        .concat()
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            BooleanQuery::Not(inner) => {
+                let inner_result = self.evaluate_boolean_query(conversation, inner);
+                BooleanResult {
+                    matches: !inner_result.matches,
+                    score: if !inner_result.matches { 1.0 } else { 0.0 },
+                    highlights: Vec::new(), // NOT queries don't highlight
+                    match_count: if !inner_result.matches { 1 } else { 0 },
+                    matched_messages: Vec::new(),
+                }
+            }
+            BooleanQuery::Group(inner) => self.evaluate_boolean_query(conversation, inner),
+        }
+    }
+
+    /// Evaluate a single term against a conversation
+    fn evaluate_term(&self, conversation: &Conversation, term: &str) -> BooleanResult {
+        let term_lower = term.to_lowercase();
+        let mut highlights = Vec::new();
+        let mut matched_messages = Vec::new();
+        let mut match_count = 0;
+        let mut score = 0.0;
+
+        // Search in messages
+        for (msg_idx, message) in conversation.messages.iter().enumerate() {
+            let content_lower = message.content.to_lowercase();
+            let mut start = 0;
+
+            while let Some(pos) = content_lower[start..].find(&term_lower) {
+                let actual_pos = start + pos;
+                highlights.push(MatchHighlight {
+                    message_index: msg_idx,
+                    start: actual_pos,
+                    end: actual_pos + term.len(),
+                    matched_text: term.to_string(),
+                    highlight_type: HighlightType::GlobalSearch,
+                });
+                match_count += 1;
+
+                if !matched_messages.contains(&msg_idx) {
+                    matched_messages.push(msg_idx);
+                }
+
+                start = actual_pos + 1;
+            }
+        }
+
+        // Search in summary
+        if let Some(ref summary) = conversation.summary {
+            if summary.to_lowercase().contains(&term_lower) {
+                match_count += 1;
+                score += 0.5; // Summary matches get some weight
+            }
+        }
+
+        // Calculate TF-IDF score for the term
+        if match_count > 0 {
+            let tf = self.calculate_term_frequency(term, conversation);
+            let idf = self.calculate_inverse_document_frequency(term);
+            score += tf * idf;
+        }
+
+        BooleanResult {
+            matches: match_count > 0,
+            score,
+            highlights,
+            match_count,
+            matched_messages,
+        }
+    }
+
     /// Score a conversation using TF-IDF
     fn score_conversation(
         &self,
@@ -373,28 +743,29 @@ impl SearchEngine {
         match mode {
             SearchMode::Text | SearchMode::Advanced => {
                 let query_lower = query_text.to_lowercase();
-                
+
                 for (msg_idx, message) in conversation.messages.iter().enumerate() {
                     let content_lower = message.content.to_lowercase();
-                    
+
                     // Find all occurrences
                     let mut start = 0;
                     while let Some(pos) = content_lower[start..].find(&query_lower) {
                         let actual_start = start + pos;
                         let actual_end = actual_start + query_text.len();
-                        
+
                         highlights.push(MatchHighlight {
                             message_index: msg_idx,
                             start: actual_start,
                             end: actual_end,
                             matched_text: message.content[actual_start..actual_end].to_string(),
+                            highlight_type: HighlightType::GlobalSearch,
                         });
-                        
+
                         match_count += 1;
                         if !matched_messages.contains(&msg_idx) {
                             matched_messages.push(msg_idx);
                         }
-                        
+
                         start = actual_start + 1;
                     }
                 }
@@ -430,12 +801,14 @@ impl SearchEngine {
     /// Calculate term frequency for TF-IDF
     fn calculate_term_frequency(&self, term: &str, conversation: &Conversation) -> f64 {
         let term_lower = term.to_lowercase();
-        let term_count = conversation.messages
+        let term_count = conversation
+            .messages
             .iter()
             .map(|msg| msg.content.to_lowercase().matches(&term_lower).count())
             .sum::<usize>() as f64;
 
-        let total_words = conversation.messages
+        let total_words = conversation
+            .messages
             .iter()
             .map(|msg| Self::extract_words(&msg.content).len())
             .sum::<usize>() as f64;
@@ -470,7 +843,7 @@ impl SearchEngine {
             let now = Utc::now();
             let age = now.signed_duration_since(last_updated);
             let days_old = age.num_days() as f64;
-            
+
             // Boost recent conversations (decay over 30 days)
             if days_old < 30.0 {
                 1.0 + (30.0 - days_old) / 30.0 * 0.5
@@ -494,7 +867,10 @@ impl SearchEngine {
     }
 
     /// Get candidate conversations based on filters
-    fn get_candidate_conversations(&self, query: &SearchQuery) -> Result<Vec<Conversation>, ClaudeToolsError> {
+    fn get_candidate_conversations(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<Vec<Conversation>, ClaudeToolsError> {
         let mut candidates = self.conversations.clone();
 
         // Apply date range filter
@@ -507,11 +883,91 @@ impl SearchEngine {
             candidates.retain(|conv| conv.project_path.contains(project));
         }
 
+        // Apply model filter
+        if let Some(ref model) = query.model_filter {
+            candidates.retain(|conv| {
+                conv.messages
+                    .iter()
+                    .any(|msg| msg.model.as_ref().map_or(false, |m| m.contains(model)))
+            });
+        }
+
+        // Apply tool filter
+        if let Some(ref tool) = query.tool_filter {
+            candidates.retain(|conv| {
+                conv.messages.iter().any(|msg| {
+                    msg.tool_uses
+                        .iter()
+                        .any(|tool_use| tool_use.name.contains(tool))
+                })
+            });
+        }
+
+        // Apply message role filter
+        if let Some(ref role) = query.message_role_filter {
+            use crate::claude::conversation::MessageRole as ConvRole;
+            match role {
+                MessageRole::User => {
+                    candidates
+                        .retain(|conv| conv.messages.iter().any(|msg| msg.role == ConvRole::User));
+                }
+                MessageRole::Assistant => {
+                    candidates.retain(|conv| {
+                        conv.messages
+                            .iter()
+                            .any(|msg| msg.role == ConvRole::Assistant)
+                    });
+                }
+                MessageRole::System => {
+                    candidates.retain(|conv| {
+                        conv.messages.iter().any(|msg| msg.role == ConvRole::System)
+                    });
+                }
+                MessageRole::Tool => {
+                    // Tool messages are typically Assistant messages with tool uses
+                    candidates
+                        .retain(|conv| conv.messages.iter().any(|msg| !msg.tool_uses.is_empty()));
+                }
+            }
+        }
+
+        // Apply message count filters
+        if let Some(min_messages) = query.min_messages {
+            candidates.retain(|conv| conv.messages.len() >= min_messages);
+        }
+        if let Some(max_messages) = query.max_messages {
+            candidates.retain(|conv| conv.messages.len() <= max_messages);
+        }
+
+        // Apply duration filters (estimated from timestamp differences)
+        if query.min_duration_minutes.is_some() || query.max_duration_minutes.is_some() {
+            candidates.retain(|conv| {
+                if let (Some(start), Some(end)) = (conv.started_at, conv.last_updated) {
+                    let duration_minutes = (end - start).num_minutes() as u32;
+
+                    let min_ok = query
+                        .min_duration_minutes
+                        .map_or(true, |min| duration_minutes >= min);
+                    let max_ok = query
+                        .max_duration_minutes
+                        .map_or(true, |max| duration_minutes <= max);
+
+                    min_ok && max_ok
+                } else {
+                    false
+                }
+            });
+        }
+
         Ok(candidates)
     }
 
     /// Filter conversations by date range
-    fn filter_by_date_range(&self, mut conversations: Vec<Conversation>, date_range: &DateRange) -> Vec<Conversation> {
+    fn filter_by_date_range(
+        &self,
+        mut conversations: Vec<Conversation>,
+        date_range: &DateRange,
+    ) -> Vec<Conversation> {
         conversations.retain(|conv| {
             if let Some(start_date) = conv.started_at {
                 let after_start = date_range.start.map_or(true, |start| start_date >= start);
@@ -580,8 +1036,16 @@ impl SearchQuery {
         Self {
             text: Some(query.to_string()),
             regex_pattern: None,
+            boolean_query: None,
             date_range: None,
             project_filter: None,
+            model_filter: None,
+            tool_filter: None,
+            message_role_filter: None,
+            min_messages: None,
+            max_messages: None,
+            min_duration_minutes: None,
+            max_duration_minutes: None,
             search_mode: SearchMode::Text,
             max_results: None,
         }
@@ -592,15 +1056,48 @@ impl SearchQuery {
         Self {
             text: None,
             regex_pattern: Some(pattern.to_string()),
+            boolean_query: None,
             date_range: None,
             project_filter: None,
+            model_filter: None,
+            tool_filter: None,
+            message_role_filter: None,
+            min_messages: None,
+            max_messages: None,
+            min_duration_minutes: None,
+            max_duration_minutes: None,
             search_mode: SearchMode::Regex,
             max_results: None,
         }
     }
 
+    /// Create a boolean search query
+    pub fn boolean(query: &str) -> Result<Self, ClaudeToolsError> {
+        let boolean_query = BooleanQueryParser::parse(query)?;
+        Ok(Self {
+            text: None,
+            regex_pattern: None,
+            boolean_query: Some(boolean_query),
+            date_range: None,
+            project_filter: None,
+            model_filter: None,
+            tool_filter: None,
+            message_role_filter: None,
+            min_messages: None,
+            max_messages: None,
+            min_duration_minutes: None,
+            max_duration_minutes: None,
+            search_mode: SearchMode::Advanced,
+            max_results: None,
+        })
+    }
+
     /// Add date range filter
-    pub fn with_date_range(mut self, start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Self {
+    pub fn with_date_range(
+        mut self,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Self {
         self.date_range = Some(DateRange { start, end });
         self
     }
@@ -611,10 +1108,63 @@ impl SearchQuery {
         self
     }
 
+    /// Add model filter
+    pub fn with_model(mut self, model: &str) -> Self {
+        self.model_filter = Some(model.to_string());
+        self
+    }
+
+    /// Add tool filter
+    pub fn with_tool(mut self, tool: &str) -> Self {
+        self.tool_filter = Some(tool.to_string());
+        self
+    }
+
+    /// Add message role filter
+    pub fn with_role(mut self, role: MessageRole) -> Self {
+        self.message_role_filter = Some(role);
+        self
+    }
+
+    /// Add message count range filter
+    pub fn with_message_count(mut self, min: Option<usize>, max: Option<usize>) -> Self {
+        self.min_messages = min;
+        self.max_messages = max;
+        self
+    }
+
+    /// Add duration filter (in minutes)
+    pub fn with_duration(mut self, min_minutes: Option<u32>, max_minutes: Option<u32>) -> Self {
+        self.min_duration_minutes = min_minutes;
+        self.max_duration_minutes = max_minutes;
+        self
+    }
+
     /// Set maximum results
     pub fn with_max_results(mut self, max: usize) -> Self {
         self.max_results = Some(max);
         self
+    }
+}
+
+impl Default for SearchQuery {
+    fn default() -> Self {
+        Self {
+            text: None,
+            regex_pattern: None,
+            boolean_query: None,
+            date_range: None,
+            project_filter: None,
+            model_filter: None,
+            tool_filter: None,
+            message_role_filter: None,
+            min_messages: None,
+            max_messages: None,
+            min_duration_minutes: None,
+            max_duration_minutes: None,
+            search_mode: SearchMode::Text,
+            max_results: None,
+        }
     }
 }
 
@@ -692,7 +1242,7 @@ mod tests {
     fn test_search_engine_indexing() {
         let mut engine = SearchEngine::new();
         let conversations = vec![create_test_conversation()];
-        
+
         let result = engine.build_index(conversations);
         assert!(result.is_ok());
         assert_eq!(engine.conversations.len(), 1);
@@ -707,14 +1257,14 @@ mod tests {
         // Test basic text search
         let query = SearchQuery::text("rust");
         let results = engine.search(&query).unwrap();
-        
+
         assert!(!results.is_empty());
         assert!(results[0].match_count > 0);
-        
+
         // Test another search term
         let query2 = SearchQuery::text("error handling");
         let results2 = engine.search(&query2).unwrap();
-        
+
         assert!(!results2.is_empty());
         assert!(results2[0].match_count > 0);
     }
@@ -723,7 +1273,7 @@ mod tests {
     fn test_date_range_query() {
         let query = SearchQuery::text("test")
             .with_date_range(Some(Utc::now() - Duration::days(1)), Some(Utc::now()));
-        
+
         assert!(query.date_range.is_some());
     }
 
