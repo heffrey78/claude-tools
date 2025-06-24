@@ -60,7 +60,11 @@ impl StreamingConversationParser {
     }
 
     /// Extract metadata without parsing entire file
-    pub fn get_metadata(&mut self, session_id: String, project_path: String) -> Result<ConversationMetadata, ClaudeToolsError> {
+    pub fn get_metadata(
+        &mut self,
+        session_id: String,
+        project_path: String,
+    ) -> Result<ConversationMetadata, ClaudeToolsError> {
         if let Some(ref cached) = self.metadata_cache {
             return Ok(cached.clone());
         }
@@ -153,20 +157,30 @@ impl StreamingConversationParser {
     }
 
     /// Convert to full conversation (for backward compatibility)
-    pub fn to_conversation(&mut self, session_id: String, project_path: String) -> Result<Conversation, ClaudeToolsError> {
+    pub fn to_conversation(
+        &mut self,
+        session_id: String,
+        project_path: String,
+    ) -> Result<Conversation, ClaudeToolsError> {
         let mut entries = Vec::new();
-        
+
         // Read all entries (this loads everything into memory)
         for i in 0..self.line_index.len() {
             match self.read_entry_at(i) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
-                    eprintln!("Warning: Failed to parse entry {}: {}", i, e);
+                    // Silently skip parse errors to avoid UI corruption in interactive mode
+                    // TODO: Add proper logging framework for debug mode
+                    let _ = e; // Suppress unused variable warning
                 }
             }
         }
 
-        Ok(Conversation::from_entries(session_id, project_path, entries))
+        Ok(Conversation::from_entries(
+            session_id,
+            project_path,
+            entries,
+        ))
     }
 }
 
@@ -204,12 +218,16 @@ impl<'a> Iterator for StreamingIterator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn create_test_jsonl() -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, r#"{{"type":"summary","summary":"Test conversation","leafUuid":"uuid1"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"summary","summary":"Test conversation","leafUuid":"uuid1"}}"#
+        )
+        .unwrap();
         writeln!(file, r#"{{"type":"user","sessionId":"test","message":{{"role":"user","content":"Hello"}},"uuid":"uuid2","timestamp":"2024-01-01T00:00:00Z","parentUuid":null}}"#).unwrap();
         writeln!(file, r#"{{"type":"assistant","sessionId":"test","message":{{"id":"msg1","type":"message","role":"assistant","content":[{{"type":"text","text":"Hi there!"}}]}},"uuid":"uuid3","timestamp":"2024-01-01T00:01:00Z","parentUuid":"uuid2"}}"#).unwrap();
         file.flush().unwrap();
@@ -221,7 +239,7 @@ mod tests {
         let test_file = create_test_jsonl();
         let parser = StreamingConversationParser::new(test_file.path(), "test_project");
         assert!(parser.is_ok());
-        
+
         let parser = parser.unwrap();
         assert_eq!(parser.entry_count(), 3);
     }
@@ -229,9 +247,12 @@ mod tests {
     #[test]
     fn test_metadata_extraction() {
         let test_file = create_test_jsonl();
-        let mut parser = StreamingConversationParser::new(test_file.path(), "test_project").unwrap();
-        
-        let metadata = parser.get_metadata("test_session".to_string(), "test_project".to_string()).unwrap();
+        let mut parser =
+            StreamingConversationParser::new(test_file.path(), "test_project").unwrap();
+
+        let metadata = parser
+            .get_metadata("test_session".to_string(), "test_project".to_string())
+            .unwrap();
         assert_eq!(metadata.line_count, 3);
         assert_eq!(metadata.session_id, "test_session");
         assert_eq!(metadata.summary, Some("Test conversation".to_string()));
@@ -240,8 +261,9 @@ mod tests {
     #[test]
     fn test_entry_reading() {
         let test_file = create_test_jsonl();
-        let mut parser = StreamingConversationParser::new(test_file.path(), "test_project").unwrap();
-        
+        let mut parser =
+            StreamingConversationParser::new(test_file.path(), "test_project").unwrap();
+
         let first_entry = parser.read_entry_at(0).unwrap();
         match first_entry {
             ConversationEntry::Summary { summary, .. } => {

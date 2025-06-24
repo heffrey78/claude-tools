@@ -150,6 +150,10 @@ pub struct App {
     in_conversation_search_mode: InConversationSearchMode,
     /// Previous state before in-conversation search
     previous_state_before_search: Option<AppState>,
+    /// Previous state before timeline mode
+    previous_state_before_timeline: Option<AppState>,
+    /// Whether we're viewing conversations from timeline (should return to timeline on escape)
+    viewing_timeline_conversations: bool,
 }
 
 impl App {
@@ -226,6 +230,8 @@ impl App {
             in_conversation_match_index: 0,
             in_conversation_search_mode: InConversationSearchMode::Text,
             previous_state_before_search: None,
+            previous_state_before_timeline: None,
+            viewing_timeline_conversations: false,
         })
     }
 
@@ -249,6 +255,13 @@ impl App {
     fn handle_list_key_event(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
+                // If we're viewing conversations from timeline, return to timeline
+                if self.viewing_timeline_conversations {
+                    self.state = AppState::Timeline;
+                    self.viewing_timeline_conversations = false;
+                    return;
+                }
+                // Otherwise quit as normal
                 self.should_quit = true;
                 self.state = AppState::Quitting;
             }
@@ -435,7 +448,11 @@ impl App {
     fn handle_timeline_key_event(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.state = AppState::ConversationList;
+                if let Some(previous_state) = self.previous_state_before_timeline.take() {
+                    self.state = previous_state;
+                } else {
+                    self.state = AppState::ConversationList;
+                }
                 self.timeline_scroll = 0;
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -598,6 +615,7 @@ impl App {
 
     /// Move to next conversation
     fn next_conversation(&mut self) {
+        self.clear_status_message(); // Clear status on navigation
         let conversations = self.get_current_conversation_list();
         let i = match self.conversation_list_state.selected() {
             Some(i) => {
@@ -614,6 +632,7 @@ impl App {
 
     /// Move to previous conversation
     fn previous_conversation(&mut self) {
+        self.clear_status_message(); // Clear status on navigation
         let conversations = self.get_current_conversation_list();
         let i = match self.conversation_list_state.selected() {
             Some(i) => {
@@ -701,6 +720,7 @@ impl App {
 
     /// Start search mode
     fn start_search(&mut self) {
+        self.clear_status_message(); // Clear status when starting search
         self.state = AppState::Search;
         self.search_query.clear();
         self.search_navigation_active = false;
@@ -847,18 +867,43 @@ impl App {
 
     /// Refresh conversations from directory
     fn refresh_conversations(&mut self) {
+        // Clear any existing status/error messages for immediate visual feedback
+        self.clear_status_message();
+        
         match self.parser.parse_all_conversations() {
             Ok(conversations) => {
+                // Store the current selected index to maintain selection if possible
+                let current_selected = self.conversation_list_state.selected();
+                
+                // Update conversations data
                 self.conversations = conversations;
+                
+                // Clear search state to ensure refreshed conversations are visible
+                self.search_results.clear();
+                self.search_query.clear();
+                
+                // Reset to conversation list view if we were in search mode
+                if matches!(self.state, AppState::Search) {
+                    self.state = AppState::ConversationList;
+                }
+                
+                // Handle list selection after refresh
+                if self.conversations.is_empty() {
+                    // No conversations available
+                    self.conversation_list_state.select(None);
+                } else if let Some(selected_idx) = current_selected {
+                    // Try to maintain selection, but clamp to valid range
+                    let new_idx = selected_idx.min(self.conversations.len() - 1);
+                    self.conversation_list_state.select(Some(new_idx));
+                } else {
+                    // No previous selection, select first item
+                    self.conversation_list_state.select(Some(0));
+                }
+                
                 self.status_message = Some(format!(
                     "Refreshed {} conversation(s)",
                     self.conversations.len()
                 ));
-                if !self.conversations.is_empty()
-                    && self.conversation_list_state.selected().is_none()
-                {
-                    self.conversation_list_state.select(Some(0));
-                }
             }
             Err(e) => {
                 self.error_message = Some(format!("Refresh error: {}", e));
@@ -873,6 +918,12 @@ impl App {
         } else {
             &self.search_results
         }
+    }
+
+    /// Clear status and error messages (called on user actions to prevent message persistence)
+    fn clear_status_message(&mut self) {
+        self.status_message = None;
+        self.error_message = None;
     }
 
     /// Start MCP server dashboard
@@ -1390,6 +1441,9 @@ impl App {
 
     /// Render conversation list
     fn render_conversation_list(&mut self, frame: &mut Frame, area: Rect) {
+        // Clear the area first to prevent text overlap during refresh
+        frame.render_widget(Clear, area);
+        
         let conversations = self.get_current_conversation_list();
 
         let items: Vec<ListItem> = conversations
@@ -1437,6 +1491,9 @@ impl App {
 
     /// Render conversation detail with enhanced markdown formatting
     fn render_conversation_detail(&mut self, frame: &mut Frame, area: Rect) {
+        // Clear the area first to prevent text overlap during refresh
+        frame.render_widget(Clear, area);
+        
         if let Some(conversation) = &self.selected_conversation {
             // Update renderer width for responsive layout
             self.conversation_renderer.update_width(area.width as usize);
@@ -1702,10 +1759,6 @@ impl App {
             }));
 
         frame.render_widget(status, area);
-
-        // Clear messages after displaying
-        self.status_message = None;
-        self.error_message = None;
     }
 
     /// Render search input
@@ -1859,6 +1912,8 @@ impl App {
 
     /// Start timeline mode
     fn start_timeline(&mut self) {
+        self.previous_state_before_timeline = Some(self.state.clone());
+        self.viewing_timeline_conversations = false; // Clear the flag when entering timeline normally
         self.state = AppState::Timeline;
         self.timeline_scroll = 0;
         self.timeline_project_index = 0;
@@ -2015,7 +2070,8 @@ impl App {
                             self.conversation_list_state.select(Some(0));
                         }
 
-                        // Navigate back to conversation list view
+                        // Navigate to conversation list view from timeline
+                        self.viewing_timeline_conversations = true;
                         self.state = AppState::ConversationList;
                         self.status_message = Some(format!(
                             "Showing {} conversations for project: {}",
@@ -2111,6 +2167,9 @@ impl App {
 
     /// Render analytics dashboard
     fn render_analytics_dashboard(&mut self, frame: &mut Frame, area: Rect) {
+        // Clear the area first to prevent text overlap during refresh
+        frame.render_widget(Clear, area);
+        
         if let Some(ref analytics) = self.analytics_data {
             let mut content = Vec::new();
 
@@ -2392,6 +2451,9 @@ impl App {
 
     /// Render timeline dashboard
     fn render_timeline_dashboard(&mut self, frame: &mut Frame, area: Rect) {
+        // Clear the area first to prevent text overlap during refresh
+        frame.render_widget(Clear, area);
+        
         // Show loading state if timeline is being generated
         if self.timeline_loading {
             let loading_content = vec![
@@ -2790,6 +2852,9 @@ impl App {
 
     /// Render MCP server dashboard
     fn render_mcp_server_dashboard(&mut self, frame: &mut Frame, area: Rect) {
+        // Clear the area first to prevent text overlap during refresh
+        frame.render_widget(Clear, area);
+        
         if self.mcp_servers.is_empty() {
             // Show empty state with discovery tips
             let empty_content = vec![

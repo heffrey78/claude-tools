@@ -50,11 +50,8 @@ impl ClaudeDirectory {
         let projects_dir = path.join("projects");
 
         if !projects_dir.exists() {
-            eprintln!(
-                "Warning: Directory {} doesn't contain 'projects' subdirectory",
-                path.display()
-            );
-            eprintln!("This may not be a valid Claude Code directory.");
+            // Silently handle missing projects directory to avoid UI corruption in interactive mode
+            // TODO: Add proper logging framework for debug mode
         }
 
         Ok(())

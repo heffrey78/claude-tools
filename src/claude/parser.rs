@@ -66,7 +66,9 @@ impl ConversationParser {
                 match self.parse_conversation_file(&path, &project_name) {
                     Ok(conversation) => conversations.push(conversation),
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse {}: {}", path.display(), e);
+                        // Silently skip parsing errors to avoid UI corruption in interactive mode
+                        // TODO: Add proper logging framework for debug mode
+                        let _ = e; // Suppress unused variable warning
                     }
                 }
             }
@@ -92,7 +94,7 @@ impl ConversationParser {
         let mut entries = Vec::new();
 
         // Parse each line as a separate JSON object
-        for (line_num, line) in reader.lines().enumerate() {
+        for (_line_num, line) in reader.lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
@@ -101,12 +103,9 @@ impl ConversationParser {
             match serde_json::from_str::<ConversationEntry>(&line) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to parse line {} in {}: {}",
-                        line_num + 1,
-                        file_path.display(),
-                        e
-                    );
+                    // Silently skip malformed lines to avoid UI corruption in interactive mode
+                    // TODO: Add proper logging framework for debug mode
+                    let _ = e; // Suppress unused variable warning
                 }
             }
         }
