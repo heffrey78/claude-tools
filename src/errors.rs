@@ -16,6 +16,9 @@ pub enum ClaudeToolsError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("General error: {0}")]
+    General(#[from] anyhow::Error),
 }
 
 pub type Result<T> = std::result::Result<T, ClaudeToolsError>;

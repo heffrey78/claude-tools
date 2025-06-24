@@ -1,7 +1,7 @@
-use super::conversation::{Conversation, MessageRole, ConversationMessage};
+use super::conversation::{Conversation, ConversationMessage, MessageRole};
 use crate::errors::ClaudeToolsError;
 use chrono::Utc;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
@@ -60,9 +60,12 @@ impl ConversationExporter {
     }
 
     /// Export a single conversation
-    pub fn export_conversation(&self, conversation: &Conversation) -> Result<ExportResult, ClaudeToolsError> {
+    pub fn export_conversation(
+        &self,
+        conversation: &Conversation,
+    ) -> Result<ExportResult, ClaudeToolsError> {
         let start_time = std::time::Instant::now();
-        
+
         let content = match self.config.format {
             ExportFormat::Markdown => self.generate_markdown(conversation)?,
             ExportFormat::Html => self.generate_html(conversation)?,
@@ -72,7 +75,7 @@ impl ConversationExporter {
 
         // Write to file
         fs::write(&self.config.output_path, content)?;
-        
+
         // Get file metadata
         let metadata = fs::metadata(&self.config.output_path)?;
         let duration = start_time.elapsed();
@@ -87,15 +90,18 @@ impl ConversationExporter {
     }
 
     /// Export multiple conversations as an archive
-    pub fn export_conversations(&self, conversations: &[Conversation]) -> Result<ExportResult, ClaudeToolsError> {
+    pub fn export_conversations(
+        &self,
+        conversations: &[Conversation],
+    ) -> Result<ExportResult, ClaudeToolsError> {
         let start_time = std::time::Instant::now();
-        
+
         match self.config.format {
             ExportFormat::Json => {
                 // Export as JSON array
                 let content = serde_json::to_string_pretty(conversations)?;
                 fs::write(&self.config.output_path, content)?;
-            },
+            }
             _ => {
                 // Create ZIP archive with individual files
                 return self.export_as_archive(conversations);
@@ -130,20 +136,29 @@ impl ConversationExporter {
             content.push_str("## Conversation Details\n\n");
             content.push_str(&format!("**Session ID:** `{}`\n", conversation.session_id));
             content.push_str(&format!("**Project:** `{}`\n", conversation.project_path));
-            
+
             if let Some(summary) = &conversation.summary {
                 content.push_str(&format!("**Summary:** {}\n", summary));
             }
-            
+
             if let Some(started) = conversation.started_at {
-                content.push_str(&format!("**Started:** {}\n", started.format("%Y-%m-%d %H:%M:%S UTC")));
+                content.push_str(&format!(
+                    "**Started:** {}\n",
+                    started.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
             }
-            
+
             if let Some(updated) = conversation.last_updated {
-                content.push_str(&format!("**Last Updated:** {}\n", updated.format("%Y-%m-%d %H:%M:%S UTC")));
+                content.push_str(&format!(
+                    "**Last Updated:** {}\n",
+                    updated.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
             }
-            
-            content.push_str(&format!("**Messages:** {}\n\n", conversation.messages.len()));
+
+            content.push_str(&format!(
+                "**Messages:** {}\n\n",
+                conversation.messages.len()
+            ));
         }
 
         // Table of contents
@@ -159,14 +174,22 @@ impl ConversationExporter {
 
             let role_name = match message.role {
                 MessageRole::User => "User",
-                MessageRole::Assistant => "Assistant", 
+                MessageRole::Assistant => "Assistant",
                 MessageRole::System => "System",
             };
 
-            content.push_str(&format!("### {} {} Message {}\n\n", role_icon, role_name, index + 1));
+            content.push_str(&format!(
+                "### {} {} Message {}\n\n",
+                role_icon,
+                role_name,
+                index + 1
+            ));
 
             if self.config.include_timestamps {
-                content.push_str(&format!("**Timestamp:** {}\n", message.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
+                content.push_str(&format!(
+                    "**Timestamp:** {}\n",
+                    message.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
             }
 
             if let Some(model) = &message.model {
@@ -190,7 +213,10 @@ impl ConversationExporter {
         }
 
         // Footer
-        content.push_str(&format!("\n*Exported on {} UTC*\n", Utc::now().format("%Y-%m-%d %H:%M:%S")));
+        content.push_str(&format!(
+            "\n*Exported on {} UTC*\n",
+            Utc::now().format("%Y-%m-%d %H:%M:%S")
+        ));
 
         Ok(content)
     }
@@ -203,7 +229,8 @@ impl ConversationExporter {
         let mut content = String::new();
 
         // HTML header with CSS
-        content.push_str(&format!(r#"<!DOCTYPE html>
+        content.push_str(&format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -314,42 +341,60 @@ impl ConversationExporter {
     </style>
 </head>
 <body>
-"#, title));
+"#,
+            title
+        ));
 
         // Header section
-        content.push_str(&format!(r#"
+        content.push_str(&format!(
+            r#"
     <div class="header">
         <h1>{}</h1>
-"#, title));
+"#,
+            title
+        ));
 
         if self.config.include_metadata {
-            content.push_str(r#"        <div class="metadata">
-            <dl>"#);
-            
-            content.push_str(&format!(r#"
+            content.push_str(
+                r#"        <div class="metadata">
+            <dl>"#,
+            );
+
+            content.push_str(&format!(
+                r#"
                 <dt>Session ID:</dt>
                 <dd><code>{}</code></dd>
                 <dt>Project:</dt>
-                <dd><code>{}</code></dd>"#, 
-                conversation.session_id, conversation.project_path));
+                <dd><code>{}</code></dd>"#,
+                conversation.session_id, conversation.project_path
+            ));
 
             if let Some(summary) = &conversation.summary {
-                content.push_str(&format!(r#"
+                content.push_str(&format!(
+                    r#"
                 <dt>Summary:</dt>
-                <dd>{}</dd>"#, html_escape(summary)));
+                <dd>{}</dd>"#,
+                    html_escape(summary)
+                ));
             }
 
             if let Some(started) = conversation.started_at {
-                content.push_str(&format!(r#"
+                content.push_str(&format!(
+                    r#"
                 <dt>Started:</dt>
-                <dd>{}</dd>"#, started.format("%Y-%m-%d %H:%M:%S UTC")));
+                <dd>{}</dd>"#,
+                    started.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
             }
 
-            content.push_str(&format!(r#"
+            content.push_str(&format!(
+                r#"
                 <dt>Messages:</dt>
                 <dd>{}</dd>
             </dl>
-        </div>"#, conversation.messages.len()));
+        </div>"#,
+                conversation.messages.len()
+            ));
         }
 
         content.push_str("    </div>\n");
@@ -362,38 +407,54 @@ impl ConversationExporter {
                 MessageRole::System => ("system", "⚙️", "System"),
             };
 
-            content.push_str(&format!(r#"
+            content.push_str(&format!(
+                r#"
     <div class="message {}">
         <div class="message-header">
             <span class="role-icon">{}</span>
-            <span>{}</span>"#, role_class, role_icon, role_name));
+            <span>{}</span>"#,
+                role_class, role_icon, role_name
+            ));
 
             if let Some(model) = &message.model {
-                content.push_str(&format!(r#"
-            <span class="model">{}</span>"#, html_escape(model)));
+                content.push_str(&format!(
+                    r#"
+            <span class="model">{}</span>"#,
+                    html_escape(model)
+                ));
             }
 
             if self.config.include_timestamps {
-                content.push_str(&format!(r#"
-            <span class="timestamp">{}</span>"#, message.timestamp.format("%Y-%m-%d %H:%M:%S UTC")));
+                content.push_str(&format!(
+                    r#"
+            <span class="timestamp">{}</span>"#,
+                    message.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
             }
 
-            content.push_str(r#"
+            content.push_str(
+                r#"
         </div>
-        <div class="content">"#);
-            
+        <div class="content">"#,
+            );
+
             content.push_str(&html_escape(&message.content));
             content.push_str("</div>");
 
             // Tool usage
             if self.config.include_tool_usage && !message.tool_uses.is_empty() {
-                content.push_str(r#"
+                content.push_str(
+                    r#"
         <div class="tools">
-            <strong>Tools Used:</strong><br>"#);
+            <strong>Tools Used:</strong><br>"#,
+                );
                 for tool in &message.tool_uses {
-                    content.push_str(&format!(r#"
-            <div class="tool">• {} (ID: {})</div>"#, 
-                html_escape(&tool.name), html_escape(&tool.id)));
+                    content.push_str(&format!(
+                        r#"
+            <div class="tool">• {} (ID: {})</div>"#,
+                        html_escape(&tool.name),
+                        html_escape(&tool.id)
+                    ));
                 }
                 content.push_str("\n        </div>");
             }
@@ -402,12 +463,15 @@ impl ConversationExporter {
         }
 
         // Footer
-        content.push_str(&format!(r#"
+        content.push_str(&format!(
+            r#"
     <div class="footer">
         <p>Exported on {} UTC</p>
     </div>
 </body>
-</html>"#, Utc::now().format("%Y-%m-%d %H:%M:%S")));
+</html>"#,
+            Utc::now().format("%Y-%m-%d %H:%M:%S")
+        ));
 
         Ok(content)
     }
@@ -416,7 +480,9 @@ impl ConversationExporter {
     fn generate_pdf(&self, _conversation: &Conversation) -> Result<String, ClaudeToolsError> {
         // For now, generate HTML and note that PDF conversion needs external tool
         // In a real implementation, we'd use wkhtmltopdf or similar
-        Err(ClaudeToolsError::Config("PDF export not yet implemented - use HTML export and convert externally".to_string()))
+        Err(ClaudeToolsError::Config(
+            "PDF export not yet implemented - use HTML export and convert externally".to_string(),
+        ))
     }
 
     /// Generate JSON content for a conversation
@@ -425,10 +491,15 @@ impl ConversationExporter {
     }
 
     /// Export multiple conversations as ZIP archive
-    fn export_as_archive(&self, _conversations: &[Conversation]) -> Result<ExportResult, ClaudeToolsError> {
+    fn export_as_archive(
+        &self,
+        _conversations: &[Conversation],
+    ) -> Result<ExportResult, ClaudeToolsError> {
         // Placeholder for ZIP archive functionality
         // Would need zip crate dependency
-        Err(ClaudeToolsError::Config("ZIP archive export not yet implemented".to_string()))
+        Err(ClaudeToolsError::Config(
+            "ZIP archive export not yet implemented".to_string(),
+        ))
     }
 }
 
@@ -495,10 +566,10 @@ mod tests {
         let conversation = create_test_conversation();
         let config = ExportConfig::default();
         let exporter = ConversationExporter::new(config);
-        
+
         let result = exporter.generate_markdown(&conversation);
         assert!(result.is_ok());
-        
+
         let content = result.unwrap();
         assert!(content.contains("# Conversation: test-123"));
         assert!(content.contains("Hello, how are you?"));
@@ -510,10 +581,10 @@ mod tests {
         let conversation = create_test_conversation();
         let config = ExportConfig::default();
         let exporter = ConversationExporter::new(config);
-        
+
         let result = exporter.generate_html(&conversation);
         assert!(result.is_ok());
-        
+
         let content = result.unwrap();
         assert!(content.contains("<!DOCTYPE html"));
         assert!(content.contains("Hello, how are you?"));
@@ -522,7 +593,10 @@ mod tests {
 
     #[test]
     fn test_html_escape() {
-        assert_eq!(html_escape("<script>alert('xss')</script>"), "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
         assert_eq!(html_escape("AT&T"), "AT&amp;T");
     }
 }

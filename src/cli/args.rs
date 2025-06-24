@@ -63,11 +63,19 @@ EXAMPLES:
     )]
     List {
         /// Show only recent conversations (last N days)
-        #[arg(long, value_name = "DAYS", help = "Show conversations from last N days (e.g., --since 7)")]
+        #[arg(
+            long,
+            value_name = "DAYS",
+            help = "Show conversations from last N days (e.g., --since 7)"
+        )]
         since: Option<u32>,
 
         /// Filter by project path
-        #[arg(long, value_name = "PATH", help = "Filter conversations by project path (partial match)")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Filter conversations by project path (partial match)"
+        )]
         project: Option<String>,
 
         /// Show detailed information including message counts and timestamps
@@ -130,22 +138,30 @@ The conversation ID can be a full ID or a unique prefix. Use 'list' command to f
         long_about = "Search through conversation content with support for regular expressions and context.
 
 EXAMPLES:
-    claude-tools search \"rust code\"              # Simple text search
-    claude-tools search --regex \"error.*handling\" # Regular expression search  
-    claude-tools search --ignore-case \"ERROR\"     # Case-insensitive search
-    claude-tools search \"function\" --context 2    # Show 2 lines of context
-    claude-tools search \"async\" --regex -C 1      # Regex with context
+    claude-tools search \"rust code\"                    # Simple text search
+    claude-tools search --regex \"error.*handling\"       # Regular expression search  
+    claude-tools search \"(rust OR python) AND error\"    # Boolean search
+    claude-tools search --ignore-case \"ERROR\"           # Case-insensitive search
+    claude-tools search \"function\" --context 2          # Show 2 lines of context
+    claude-tools search \"async\" --model claude-3        # Filter by model
+    claude-tools search \"debug\" --tool bash --after \"2024-01-01\"
 
 TIP: Use the interactive mode (claude-tools interactive) for real-time search
      with visual highlighting and navigation between results."
     )]
     Search {
-        /// Search query (supports text patterns or regex with --regex)
-        #[arg(help = "Text to search for in conversation content")]
+        /// Search query (supports text patterns, boolean logic, or regex with --regex)
+        #[arg(
+            help = "Text to search for in conversation content. Supports boolean operators (AND, OR, NOT) and parentheses"
+        )]
         query: String,
 
         /// Use regular expressions for pattern matching
-        #[arg(short, long, help = "Enable regex pattern matching (e.g., 'error.*handling')")]
+        #[arg(
+            short,
+            long,
+            help = "Enable regex pattern matching (e.g., 'error.*handling')"
+        )]
         regex: bool,
 
         /// Case insensitive search (ignore letter case)
@@ -155,6 +171,55 @@ TIP: Use the interactive mode (claude-tools interactive) for real-time search
         /// Show context around matches (number of lines before/after)
         #[arg(short = 'C', long, default_value = "0")]
         context: usize,
+
+        /// Filter by model used in conversation
+        #[arg(long, help = "Only search conversations that used this model")]
+        model: Option<String>,
+
+        /// Filter by tool used in conversation
+        #[arg(long, help = "Only search conversations that used this tool")]
+        tool: Option<String>,
+
+        /// Filter by message role
+        #[arg(long, value_enum, help = "Only search messages from this role")]
+        role: Option<MessageRole>,
+
+        /// Search conversations after this date (YYYY-MM-DD or relative like '7 days ago')
+        #[arg(long, help = "Only search conversations after this date")]
+        after: Option<String>,
+
+        /// Search conversations before this date (YYYY-MM-DD or relative like '1 week ago')
+        #[arg(long, help = "Only search conversations before this date")]
+        before: Option<String>,
+
+        /// Filter by minimum number of messages
+        #[arg(
+            long,
+            help = "Only search conversations with at least this many messages"
+        )]
+        min_messages: Option<usize>,
+
+        /// Filter by maximum number of messages
+        #[arg(
+            long,
+            help = "Only search conversations with at most this many messages"
+        )]
+        max_messages: Option<usize>,
+
+        /// Filter by minimum conversation duration in minutes
+        #[arg(
+            long,
+            help = "Only search conversations that lasted at least this long"
+        )]
+        min_duration: Option<u32>,
+
+        /// Filter by maximum conversation duration in minutes
+        #[arg(long, help = "Only search conversations that lasted at most this long")]
+        max_duration: Option<u32>,
+
+        /// Maximum number of results to return
+        #[arg(long, default_value = "50")]
+        limit: usize,
     },
 
     /// Show conversation statistics
@@ -398,10 +463,9 @@ EXAMPLES:
         #[arg(long, value_name = "PATH")]
         paths: Vec<String>,
     },
-    
+
     /// Add a new MCP server to Claude Code configuration
-    #[command(
-        long_about = "Add a new MCP server to ~/.claude.json configuration.
+    #[command(long_about = "Add a new MCP server to ~/.claude.json configuration.
 
 EXAMPLES:
     # Add a global MCP server
@@ -411,82 +475,77 @@ EXAMPLES:
     claude-tools mcp add --global weather --command npx --args '@example/weather-server' --env API_KEY=secret
     
     # Add to current project
-    claude-tools mcp add my-server --command ./server.js"
-    )]
+    claude-tools mcp add my-server --command ./server.js")]
     Add {
         /// Server name
         name: String,
-        
+
         /// Command to execute
         #[arg(long)]
         command: String,
-        
+
         /// Command arguments
         #[arg(long, value_delimiter = ' ')]
         args: Vec<String>,
-        
+
         /// Environment variables (KEY=VALUE format)
         #[arg(long, value_delimiter = ' ')]
         env: Vec<String>,
-        
+
         /// Add as global server (available to all projects)
         #[arg(long)]
         global: bool,
-        
+
         /// Project path (defaults to current directory)
         #[arg(long)]
         project: Option<String>,
     },
-    
+
     /// Remove an MCP server from Claude Code configuration
-    #[command(
-        long_about = "Remove an MCP server from ~/.claude.json configuration.
+    #[command(long_about = "Remove an MCP server from ~/.claude.json configuration.
 
 EXAMPLES:
     claude-tools mcp remove brave-search --global  # Remove global server
-    claude-tools mcp remove my-server               # Remove from current project"
-    )]
+    claude-tools mcp remove my-server               # Remove from current project")]
     Remove {
         /// Server name
         name: String,
-        
+
         /// Remove from global configuration
         #[arg(long)]
         global: bool,
-        
+
         /// Project path (defaults to current directory)
         #[arg(long)]
         project: Option<String>,
     },
-    
+
     /// Update MCP server configuration
-    #[command(
-        long_about = "Update an existing MCP server configuration.
+    #[command(long_about = "Update an existing MCP server configuration.
 
 EXAMPLES:
     claude-tools mcp update brave --env BRAVE_API_KEY=new-key
-    claude-tools mcp update my-server --args '-v' '--debug'"
-    )]
+    claude-tools mcp update my-server --args '-v' '--debug'")]
     Update {
         /// Server name
         name: String,
-        
+
         /// Update command
         #[arg(long)]
         command: Option<String>,
-        
+
         /// Update arguments
         #[arg(long, value_delimiter = ' ')]
         args: Option<Vec<String>>,
-        
+
         /// Update environment variables (KEY=VALUE format)
         #[arg(long, value_delimiter = ' ')]
         env: Option<Vec<String>>,
-        
+
         /// Update global server
         #[arg(long)]
         global: bool,
-        
+
         /// Project path (defaults to current directory)
         #[arg(long)]
         project: Option<String>,

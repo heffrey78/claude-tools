@@ -1,8 +1,8 @@
 use super::conversation::{Conversation, MessageRole};
 use crate::errors::ClaudeToolsError;
-use chrono::{DateTime, Utc, Datelike, Timelike};
-use serde::{Serialize, Deserialize};
-use std::collections::{HashMap, BTreeMap};
+use chrono::{DateTime, Datelike, Timelike, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
 /// Comprehensive analytics engine for Claude Code conversations
 pub struct AnalyticsEngine {
@@ -223,13 +223,25 @@ impl AnalyticsEngine {
     fn compute_basic_stats(&self) -> BasicStats {
         let total_conversations = self.conversations.len();
         let total_messages: usize = self.conversations.iter().map(|c| c.messages.len()).sum();
-        let total_user_messages: usize = self.conversations.iter().map(|c| c.user_message_count()).sum();
-        let total_assistant_messages: usize = self.conversations.iter().map(|c| c.assistant_message_count()).sum();
-        let total_system_messages: usize = self.conversations.iter()
+        let total_user_messages: usize = self
+            .conversations
+            .iter()
+            .map(|c| c.user_message_count())
+            .sum();
+        let total_assistant_messages: usize = self
+            .conversations
+            .iter()
+            .map(|c| c.assistant_message_count())
+            .sum();
+        let total_system_messages: usize = self
+            .conversations
+            .iter()
             .flat_map(|c| &c.messages)
             .filter(|m| m.role == MessageRole::System)
             .count();
-        let total_tool_uses: usize = self.conversations.iter()
+        let total_tool_uses: usize = self
+            .conversations
+            .iter()
             .flat_map(|c| &c.messages)
             .map(|m| m.tool_uses.len())
             .sum();
@@ -240,7 +252,11 @@ impl AnalyticsEngine {
             0.0
         };
 
-        let message_counts: Vec<usize> = self.conversations.iter().map(|c| c.messages.len()).collect();
+        let message_counts: Vec<usize> = self
+            .conversations
+            .iter()
+            .map(|c| c.messages.len())
+            .collect();
         let conversation_length_distribution = Self::calculate_length_distribution(&message_counts);
 
         let date_range = self.calculate_date_range();
@@ -283,7 +299,8 @@ impl AnalyticsEngine {
         }
 
         // Calculate peak usage hours
-        let mut peak_usage_hours: Vec<_> = usage_by_hour.iter()
+        let mut peak_usage_hours: Vec<_> = usage_by_hour
+            .iter()
             .map(|(&hour, &count)| PeakUsage {
                 hour,
                 count,
@@ -356,7 +373,8 @@ impl AnalyticsEngine {
 
         // Calculate top models
         let total_model_usage: usize = model_usage_count.values().sum();
-        let mut top_models: Vec<_> = model_usage_count.iter()
+        let mut top_models: Vec<_> = model_usage_count
+            .iter()
             .map(|(model, &count)| ModelUsage {
                 model_name: model.clone(),
                 usage_count: count,
@@ -365,7 +383,10 @@ impl AnalyticsEngine {
                 } else {
                     0.0
                 },
-                avg_conversation_length: avg_conversation_length_per_model.get(model).copied().unwrap_or(0.0),
+                avg_conversation_length: avg_conversation_length_per_model
+                    .get(model)
+                    .copied()
+                    .unwrap_or(0.0),
             })
             .collect();
         top_models.sort_by(|a, b| b.usage_count.cmp(&a.usage_count));
@@ -418,12 +439,14 @@ impl AnalyticsEngine {
         };
 
         // For now, assume 100% success rate (we don't have failure data)
-        let tool_success_rates: HashMap<String, f64> = tool_usage_count.keys()
+        let tool_success_rates: HashMap<String, f64> = tool_usage_count
+            .keys()
             .map(|tool| (tool.clone(), 100.0))
             .collect();
 
         // Calculate top tools
-        let mut top_tools: Vec<_> = tool_usage_count.iter()
+        let mut top_tools: Vec<_> = tool_usage_count
+            .iter()
             .map(|(tool, &count)| ToolUsage {
                 tool_name: tool.clone(),
                 usage_count: count,
@@ -454,8 +477,11 @@ impl AnalyticsEngine {
 
         for conversation in &self.conversations {
             let project = &conversation.project_path;
-            *conversations_per_project.entry(project.clone()).or_insert(0) += 1;
-            *messages_per_project.entry(project.clone()).or_insert(0) += conversation.messages.len();
+            *conversations_per_project
+                .entry(project.clone())
+                .or_insert(0) += 1;
+            *messages_per_project.entry(project.clone()).or_insert(0) +=
+                conversation.messages.len();
 
             // Track activity over time
             if let Some(started_at) = conversation.started_at {
@@ -481,7 +507,8 @@ impl AnalyticsEngine {
 
         // Calculate top projects
         let total_conversations = self.conversations.len();
-        let mut top_projects: Vec<_> = conversations_per_project.iter()
+        let mut top_projects: Vec<_> = conversations_per_project
+            .iter()
             .map(|(project, &conv_count)| ProjectUsage {
                 project_name: project.clone(),
                 conversation_count: conv_count,
@@ -506,7 +533,9 @@ impl AnalyticsEngine {
 
     /// Compute conversation quality metrics
     fn compute_quality_metrics(&self) -> QualityMetrics {
-        let durations: Vec<i64> = self.conversations.iter()
+        let durations: Vec<i64> = self
+            .conversations
+            .iter()
             .filter_map(|c| c.duration())
             .map(|d| d.num_minutes())
             .collect();
@@ -518,7 +547,9 @@ impl AnalyticsEngine {
         };
 
         // Calculate turn-taking patterns
-        let total_turns: usize = self.conversations.iter()
+        let total_turns: usize = self
+            .conversations
+            .iter()
             .map(|c| self.count_conversation_turns(c))
             .sum();
         let average_turns_per_conversation = if self.conversations.len() > 0 {
@@ -528,14 +559,18 @@ impl AnalyticsEngine {
         };
 
         // Message length distribution
-        let message_lengths: Vec<usize> = self.conversations.iter()
+        let message_lengths: Vec<usize> = self
+            .conversations
+            .iter()
             .flat_map(|c| &c.messages)
             .map(|m| m.content.len())
             .collect();
         let message_length_distribution = Self::calculate_length_distribution(&message_lengths);
 
         // Simple completion rate (conversations with at least 2 messages)
-        let completed_conversations = self.conversations.iter()
+        let completed_conversations = self
+            .conversations
+            .iter()
             .filter(|c| c.messages.len() >= 2)
             .count();
         let completion_rate = if self.conversations.len() > 0 {
@@ -598,7 +633,9 @@ impl AnalyticsEngine {
 
     /// Calculate date range of conversations
     fn calculate_date_range(&self) -> DateRange {
-        let dates: Vec<DateTime<Utc>> = self.conversations.iter()
+        let dates: Vec<DateTime<Utc>> = self
+            .conversations
+            .iter()
             .filter_map(|c| c.started_at)
             .collect();
 
@@ -626,17 +663,22 @@ impl AnalyticsEngine {
     }
 
     /// Calculate activity trends
-    fn calculate_activity_trends(&self, conversations_per_day: &BTreeMap<String, usize>) -> ActivityTrends {
+    fn calculate_activity_trends(
+        &self,
+        conversations_per_day: &BTreeMap<String, usize>,
+    ) -> ActivityTrends {
         // Simplified trend calculation
         let weekly_growth_rate = 0.0; // TODO: Implement proper trend analysis
         let monthly_growth_rate = 0.0; // TODO: Implement proper trend analysis
 
-        let most_active_month = conversations_per_day.iter()
+        let most_active_month = conversations_per_day
+            .iter()
             .max_by_key(|(_, &count)| count)
             .map(|(date, _)| date.clone())
             .unwrap_or_else(|| "N/A".to_string());
 
-        let most_active_day = conversations_per_day.iter()
+        let most_active_day = conversations_per_day
+            .iter()
             .max_by_key(|(_, &count)| count)
             .map(|(date, _)| date.clone())
             .unwrap_or_else(|| "N/A".to_string());

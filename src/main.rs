@@ -43,6 +43,11 @@ fn main() {
                 eprintln!("   • Check if Claude Code is currently running and try again");
                 std::process::exit(1);
             }
+            ClaudeToolsError::General(err) => {
+                eprintln!("❌ Error: {}", err);
+                eprintln!("💡 Run with --verbose for more details");
+                std::process::exit(1);
+            }
         }
     }
 }

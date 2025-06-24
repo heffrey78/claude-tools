@@ -2,9 +2,9 @@
 
 A comprehensive suite of tools for working with Claude, Claude Code, and MCP servers.
 
-## Current Status: MVP Complete! 🎉
+## Current Status: Phase 2 Complete! 🎉
 
-✅ **MVP Delivered** - Claude History Browser CLI with Terminal UI
+✅ **Advanced Features Delivered** - Timeline Analytics, Export System, Performance Optimization
 
 ## Features
 
@@ -13,33 +13,46 @@ A comprehensive suite of tools for working with Claude, Claude Code, and MCP ser
 - **Conversation Browser**: Scrollable list with summaries and metadata
 - **Detail View**: Full conversation display with markdown rendering and syntax highlighting
 - **Advanced Search**: TF-IDF ranking, regex support, visual highlighting, navigation (n/N)
+- **Timeline Dashboard**: Activity timeline with project analytics (press 't')
 - **Analytics Dashboard**: Comprehensive statistics and insights (press 'a')
 - **Export Functionality**: Export conversations directly from UI (press 'e' in detail view)
 - **Help System**: Built-in help overlay with all keyboard shortcuts
 
 ### 🔍 Advanced Search Features
-- **Multiple Search Modes**: Text, regex (`regex:`), and fuzzy search (`fuzzy:`)
-- **Visual Highlighting**: Yellow background highlighting of search matches
-- **Search Navigation**: Navigate between results with 'n' and 'N' keys
-- **Performance**: <50ms search times with parallel processing and caching
-- **Smart Ranking**: TF-IDF scoring with recency boost and length normalization
-- **Filtering**: Date range and project filtering capabilities
+- **Boolean Queries**: Complex logic with AND, OR, NOT operators and parentheses grouping
+- **Natural Language Dates**: Parse "7 days ago", "last week", "yesterday" automatically
+- **Multi-Criteria Filtering**: Filter by model, tool, role, date range, message count, duration
+- **Regular Expressions**: Full regex pattern matching with validation and optimization
+- **Visual Highlighting**: Match highlighting in conversation snippets
+- **Relevance Scoring**: TF-IDF ranking with recency and conversation quality boosting
+- **Performance**: <50ms search times with parallel processing and intelligent caching
 
-### 📊 Analytics and Insights
+### 📊 Timeline & Analytics Dashboard
+- **Activity Timeline**: Visual timeline showing project-level activity patterns
+- **Time Period Analysis**: 24h, 48h, 1 week, 1 month time windows
+- **Project Ranking**: Intelligent ranking with activity indicators and trends
+- **Tool Usage Tracking**: Top tools analysis across projects and time periods
+- **Intelligent Caching**: Hash-based validation with instant period switching
+- **Export Capabilities**: Export timeline and analytics to JSON or CSV
+- **Interactive Navigation**: Navigate from timeline to project conversations
+- **Performance Optimization**: <200ms timeline generation with smart filtering
+
+### 📊 Advanced Analytics
 - **Comprehensive Metrics**: 6 analytics categories covering all conversation aspects
 - **Temporal Analysis**: Peak usage hours, weekday patterns, activity trends
 - **Model & Tool Usage**: Track which models and tools you use most
 - **Project Analytics**: Understand conversation distribution across projects
 - **Quality Metrics**: Average duration, completion rates, message length stats
-- **Export Capabilities**: Export analytics to JSON or CSV for external analysis
 - **Interactive Dashboard**: Terminal UI analytics view with scrolling and navigation
 
-### 📊 Command Line Interface
+### 💻 Command Line Interface
 - **List Conversations**: View all conversations with optional detailed view
 - **Show Conversations**: Display full conversation content in multiple formats
+- **Timeline Commands**: Generate activity timelines with various time periods
 - **Export Conversations**: Export to Markdown, HTML, JSON formats with full metadata
 - **Search Content**: Find conversations by content with match highlighting
 - **Statistics**: Comprehensive analytics with export capabilities (JSON/CSV)
+- **MCP Management**: Discover and manage MCP servers
 
 ### 🚀 Quick Start
 ```bash
@@ -48,22 +61,33 @@ git clone <repository-url>
 cd claude_code
 cargo build --release
 
-# Interactive terminal UI (recommended)
-cargo run -- interactive
+# Install globally for easier usage
+cargo install --path .
 
-# Or use command line interface
-cargo run -- list --detailed
-cargo run -- search "claude code"
-cargo run -- show <conversation-id>
-cargo run -- show <id> --export markdown --include-metadata --include-tools
-cargo run -- stats --detailed
-cargo run -- stats --export json  # Export analytics data
+# Interactive terminal UI (recommended)
+claude-tools interactive  # or: cargo run -- interactive
+
+# Timeline analysis
+claude-tools timeline --period day
+claude-tools timeline --period week --detailed
+claude-tools timeline --export json --output timeline.json
+
+# Command line interface
+claude-tools list --detailed
+claude-tools search "(rust OR python) AND error"  # Boolean queries
+claude-tools search "async.*function" --regex        # Regular expressions
+claude-tools search "debug" --tool bash --after "7 days ago"  # Multi-criteria
+claude-tools show <conversation-id> --format markdown
+claude-tools show <id> --export html --output conversation.html
+claude-tools stats --global --export csv
 ```
 
 ### 📈 Performance
 - **127+ conversations** parsed efficiently from real ~/.claude/ data
 - **17,976+ messages** processed with memory-efficient streaming
-- **<2.4s startup** time for full directory analysis
+- **<200ms timeline generation** with intelligent caching and filtering
+- **<50ms search times** with parallel processing and TF-IDF ranking
+- **Instant period switching** via smart filtering instead of regeneration
 - **Cross-platform** support (Linux, macOS, Windows)
 
 ## Development Roadmap
@@ -77,19 +101,23 @@ cargo run -- stats --export json  # Export analytics data
 - ✅ Search and filtering functionality
 - ✅ Help system and documentation
 
-### Phase 2: Enhanced Browsing (In Progress)
-- ✅ Advanced search with TF-IDF ranking and regex support
+### Phase 2: Enhanced Browsing ✅ Complete
+- ✅ Advanced search with boolean queries, regex, and multi-criteria filtering
 - ✅ Visual search highlighting and navigation
 - ✅ Markdown rendering with syntax highlighting
 - ✅ Conversation statistics and analytics
 - ✅ Export to multiple formats (markdown, HTML, JSON) with CLI and interactive UI
-- 🔲 Conversation tagging and organization
+- ✅ Activity timeline dashboard with intelligent caching
+- ✅ Timeline CLI integration with export functionality
+- ✅ Performance optimization with smart filtering
 
-### Phase 3: MCP Server Management (Planned)
-- Server discovery and lifecycle management
-- Configuration management
-- Health monitoring and diagnostics
-- Log aggregation and viewing
+### Phase 3: MCP Server Management (In Progress)
+- ✅ Server discovery framework
+- ✅ Configuration management structure
+- ✅ Basic CLI integration for server listing
+- 🔲 Health monitoring and diagnostics
+- 🔲 Advanced server management features
+- 🔲 Log aggregation and viewing
 
 ### Phase 4: Claude Code SDK Integration (Vision)
 - Multi-instance coordination
@@ -106,27 +134,48 @@ cargo run -- stats --export json  # Export analytics data
 ## Technical Stack
 
 - **Language**: Rust (for performance and memory safety)
-- **CLI**: clap for argument parsing
+- **CLI**: clap for argument parsing with comprehensive help
 - **TUI**: ratatui for terminal interface with crossterm
 - **Search**: Custom TF-IDF engine with rayon parallel processing
+- **Analytics**: Timeline analysis with temporal indexing and caching
 - **Rendering**: pulldown-cmark for markdown, syntect for syntax highlighting
-- **JSON**: serde_json with streaming support
-- **Caching**: LRU caching for performance optimization
+- **Export**: Multi-format export system (Markdown, HTML, JSON, CSV)
+- **JSON**: serde_json with streaming support for large files
+- **Caching**: Intelligent hash-based caching with LRU eviction
+- **Performance**: Smart filtering and hierarchical cache lookups
 
 ## Project Structure
 
 ```
 claude_code/
-├── tasks/                  # Task management
-│   ├── tasks-directive.md  # Task creation guidelines
-│   ├── roadmap.md         # Project roadmap
-│   ├── active/            # Current sprint tasks
-│   ├── backlog/           # Future tasks
-│   ├── completed/         # Archived tasks
-│   └── templates/         # Task templates
-├── src/                   # Source code (coming soon)
-├── tests/                 # Test suites (coming soon)
-└── docs/                  # Documentation (coming soon)
+├── src/                       # Source code
+│   ├── cli/                   # Command-line interface
+│   │   ├── args.rs           # CLI argument definitions
+│   │   └── commands.rs       # Command implementations
+│   ├── claude/               # Claude-specific functionality
+│   │   ├── analytics.rs      # Conversation analytics
+│   │   ├── cache.rs          # Timeline caching system
+│   │   ├── conversation.rs   # Data structures and parsing
+│   │   ├── directory.rs      # Directory detection
+│   │   ├── export.rs         # Export functionality
+│   │   ├── search.rs         # Search engine
+│   │   └── timeline.rs       # Activity timeline
+│   ├── mcp/                  # MCP server management
+│   │   ├── discovery.rs      # Server discovery
+│   │   └── server.rs         # Server management
+│   ├── ui/                   # Terminal user interface
+│   │   ├── app.rs            # Main application state
+│   │   └── conversation_display.rs # Rendering
+│   ├── errors.rs             # Error handling
+│   ├── lib.rs                # Library exports
+│   └── main.rs               # Application entry point
+├── tasks/                    # Task management
+│   ├── active/               # Current work items
+│   ├── completed/            # Finished tasks
+│   └── backlog/              # Future tasks
+├── tests/                    # Integration tests
+├── CLAUDE.md                 # Development guidance
+└── README.md                 # Project documentation
 ```
 
 ## Contributing

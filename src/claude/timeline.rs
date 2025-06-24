@@ -1,16 +1,19 @@
-use chrono::{DateTime, Utc, Duration, Timelike};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap, HashSet};
 use crate::claude::{Conversation, MessageRole};
+use chrono::{DateTime, Duration, Timelike, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Time periods for filtering activity timeline
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TimePeriod {
-    LastDay,      // Past 24 hours
-    LastTwoDay,   // Past 48 hours
-    LastWeek,     // Past 7 days
-    LastMonth,    // Past 30 days
-    Custom { start: DateTime<Utc>, end: DateTime<Utc> },
+    LastDay,    // Past 24 hours
+    LastTwoDay, // Past 48 hours
+    LastWeek,   // Past 7 days
+    LastMonth,  // Past 30 days
+    Custom {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
 }
 
 impl TimePeriod {
@@ -43,7 +46,7 @@ impl TimePeriod {
     pub fn label(&self) -> &'static str {
         match self {
             TimePeriod::LastDay => "Past 24 hours",
-            TimePeriod::LastTwoDay => "Past 48 hours", 
+            TimePeriod::LastTwoDay => "Past 48 hours",
             TimePeriod::LastWeek => "Past week",
             TimePeriod::LastMonth => "Past month",
             TimePeriod::Custom { .. } => "Custom range",
@@ -78,8 +81,8 @@ impl Default for TimelineConfig {
 /// Depth of topical summary generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SummaryDepth {
-    Brief,        // 1-2 sentences
-    Detailed,     // 1-2 paragraphs  
+    Brief,         // 1-2 sentences
+    Detailed,      // 1-2 paragraphs
     Comprehensive, // Full analysis
 }
 
@@ -326,9 +329,9 @@ impl ActivityTimeline {
                     started_at >= start_time && started_at <= end_time
                 } else {
                     // If no timestamps, check message timestamps
-                    conv.messages.iter().any(|msg| {
-                        msg.timestamp >= start_time && msg.timestamp <= end_time
-                    })
+                    conv.messages
+                        .iter()
+                        .any(|msg| msg.timestamp >= start_time && msg.timestamp <= end_time)
                 }
             })
             .collect()
@@ -359,8 +362,9 @@ impl ActivityTimeline {
         let mut timeline = Self::new(config.clone());
 
         // Step 1: Filter by time period
-        let filtered_convs = Self::filter_conversations_by_time_period(&all_conversations, config.period);
-        
+        let filtered_convs =
+            Self::filter_conversations_by_time_period(&all_conversations, config.period);
+
         // Step 2: Group by project
         let project_groups = Self::group_conversations_by_project(filtered_convs);
 
@@ -371,18 +375,23 @@ impl ActivityTimeline {
             }
 
             // Apply max conversations limit if specified
-            let limited_conversations: Vec<_> = if let Some(max_count) = config.max_conversations_per_project {
-                // Sort by most recent first, then take limit
-                let mut sorted_convs = conversations;
-                sorted_convs.sort_by(|a, b| {
-                    let a_time = a.last_updated.unwrap_or_else(|| a.started_at.unwrap_or_else(Utc::now));
-                    let b_time = b.last_updated.unwrap_or_else(|| b.started_at.unwrap_or_else(Utc::now));
-                    b_time.cmp(&a_time) // Most recent first
-                });
-                sorted_convs.into_iter().take(max_count).cloned().collect()
-            } else {
-                conversations.into_iter().cloned().collect()
-            };
+            let limited_conversations: Vec<_> =
+                if let Some(max_count) = config.max_conversations_per_project {
+                    // Sort by most recent first, then take limit
+                    let mut sorted_convs = conversations;
+                    sorted_convs.sort_by(|a, b| {
+                        let a_time = a
+                            .last_updated
+                            .unwrap_or_else(|| a.started_at.unwrap_or_else(Utc::now));
+                        let b_time = b
+                            .last_updated
+                            .unwrap_or_else(|| b.started_at.unwrap_or_else(Utc::now));
+                        b_time.cmp(&a_time) // Most recent first
+                    });
+                    sorted_convs.into_iter().take(max_count).cloned().collect()
+                } else {
+                    conversations.into_iter().cloned().collect()
+                };
 
             let project_activity = ProjectActivity::from_conversations(
                 project_path.clone(),
@@ -401,10 +410,7 @@ impl ActivityTimeline {
     }
 
     /// Generate activity timeline from conversations (legacy method - use create_filtered_timeline for new code)
-    pub fn from_conversations(
-        conversations: Vec<Conversation>,
-        config: TimelineConfig,
-    ) -> Self {
+    pub fn from_conversations(conversations: Vec<Conversation>, config: TimelineConfig) -> Self {
         // Use the new advanced filtering method
         Self::create_filtered_timeline(conversations, config)
     }
@@ -413,7 +419,9 @@ impl ActivityTimeline {
     pub fn projects_by_activity(&self) -> Vec<&ProjectActivity> {
         let mut projects: Vec<_> = self.projects.values().collect();
         projects.sort_by(|a, b| {
-            b.stats.total_messages.cmp(&a.stats.total_messages)
+            b.stats
+                .total_messages
+                .cmp(&a.stats.total_messages)
                 .then_with(|| b.stats.conversation_count.cmp(&a.stats.conversation_count))
         });
         projects
@@ -436,9 +444,9 @@ impl ActivityTimeline {
     /// Generate overall timeline statistics
     fn generate_statistics(&mut self) {
         let mut stats = TimelineStats::default();
-        
+
         stats.active_projects = self.projects.len();
-        
+
         let mut most_active_count = 0;
         let mut most_active_project = None;
         let mut total_conversations = 0;
@@ -454,9 +462,7 @@ impl ActivityTimeline {
             TimePeriod::LastTwoDay => 2.0,
             TimePeriod::LastWeek => 7.0,
             TimePeriod::LastMonth => 30.0,
-            TimePeriod::Custom { start, end } => {
-                (end - start).num_days() as f64
-            }
+            TimePeriod::Custom { start, end } => (end - start).num_days() as f64,
         };
 
         // First pass: collect basic statistics
@@ -475,8 +481,16 @@ impl ActivityTimeline {
             }
 
             // Aggregate message counts by role
-            total_user_messages += project.stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0);
-            total_assistant_messages += project.stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0);
+            total_user_messages += project
+                .stats
+                .messages_by_role
+                .get(&MessageRole::User)
+                .unwrap_or(&0);
+            total_assistant_messages += project
+                .stats
+                .messages_by_role
+                .get(&MessageRole::Assistant)
+                .unwrap_or(&0);
 
             // Collect conversation lengths
             for conv in &project.conversations {
@@ -489,7 +503,7 @@ impl ActivityTimeline {
         stats.total_messages = total_messages;
         stats.most_active_project = most_active_project;
         stats.total_tool_usage = global_tool_counts.values().sum();
-        
+
         // Create global top tools list
         let mut global_tools: Vec<_> = global_tool_counts.into_iter().collect();
         global_tools.sort_by(|a, b| b.1.cmp(&a.1));
@@ -497,7 +511,8 @@ impl ActivityTimeline {
 
         // Calculate global conversation length average
         stats.global_avg_conversation_length = if !all_conversation_lengths.is_empty() {
-            all_conversation_lengths.iter().sum::<usize>() as f64 / all_conversation_lengths.len() as f64
+            all_conversation_lengths.iter().sum::<usize>() as f64
+                / all_conversation_lengths.len() as f64
         } else {
             0.0
         };
@@ -516,8 +531,15 @@ impl ActivityTimeline {
         };
 
         // Second pass: calculate comparative metrics and visual indicators
-        let max_messages = self.projects.values().map(|p| p.stats.total_messages).max().unwrap_or(1);
-        let mut project_names_and_messages: Vec<_> = self.projects.iter()
+        let max_messages = self
+            .projects
+            .values()
+            .map(|p| p.stats.total_messages)
+            .max()
+            .unwrap_or(1);
+        let mut project_names_and_messages: Vec<_> = self
+            .projects
+            .iter()
             .map(|(name, project)| (name.clone(), project.stats.total_messages))
             .collect();
         project_names_and_messages.sort_by(|a, b| b.1.cmp(&a.1));
@@ -540,13 +562,13 @@ impl ActivityTimeline {
                 let message_frequency = project.stats.total_messages as f64 / days;
                 let activity_score = project.stats.total_messages as f64 / max_messages as f64;
                 let activity_rank = Some(rank + 1);
-                
+
                 // Generate indicators with current project data
                 let indicators = self.generate_activity_indicators_for_stats(
-                    &project.stats, 
+                    &project.stats,
                     &project.conversations,
-                    rank + 1, 
-                    project_names_and_messages.len()
+                    rank + 1,
+                    project_names_and_messages.len(),
                 );
 
                 project_updates.push((
@@ -561,7 +583,8 @@ impl ActivityTimeline {
         }
 
         // Apply updates
-        for (project_name, conv_freq, msg_freq, act_score, act_rank, indicators) in project_updates {
+        for (project_name, conv_freq, msg_freq, act_score, act_rank, indicators) in project_updates
+        {
             if let Some(project) = self.projects.get_mut(&project_name) {
                 project.stats.conversation_frequency = conv_freq;
                 project.stats.message_frequency = msg_freq;
@@ -599,10 +622,8 @@ impl ActivityTimeline {
                     .push(session_id);
 
                 // Update activity heatmap
-                *temporal_index
-                    .activity_heatmap
-                    .entry(date)
-                    .or_default() += conv_summary.message_count;
+                *temporal_index.activity_heatmap.entry(date).or_default() +=
+                    conv_summary.message_count;
             }
         }
 
@@ -611,36 +632,39 @@ impl ActivityTimeline {
 
     /// Generate visual activity indicators for a project (using project stats and conversations)
     fn generate_activity_indicators_for_stats(
-        &self, 
-        stats: &ProjectStats, 
+        &self,
+        stats: &ProjectStats,
         conversations: &[ConversationSummary],
-        rank: usize, 
-        total_projects: usize
+        rank: usize,
+        total_projects: usize,
     ) -> ActivityIndicators {
         // Calculate progress bar value (activity score)
         let progress_bar = stats.activity_score;
 
         // Create bar segments for visualization
         let user_messages = stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0);
-        let assistant_messages = stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0);
+        let assistant_messages = stats
+            .messages_by_role
+            .get(&MessageRole::Assistant)
+            .unwrap_or(&0);
         let total_msgs = stats.total_messages;
         let total_tools: usize = stats.tool_usage.values().sum();
 
         let mut bar_segments = Vec::new();
-        
+
         if total_msgs > 0 {
             bar_segments.push(BarSegment {
                 value: *user_messages as f64 / total_msgs as f64,
                 segment_type: SegmentType::UserMessages,
                 color_hint: "blue".to_string(),
             });
-            
+
             bar_segments.push(BarSegment {
                 value: *assistant_messages as f64 / total_msgs as f64,
                 segment_type: SegmentType::AssistantMessages,
                 color_hint: "green".to_string(),
             });
-            
+
             if total_tools > 0 {
                 bar_segments.push(BarSegment {
                     value: total_tools as f64 / total_msgs as f64,
@@ -658,9 +682,18 @@ impl ActivityTimeline {
 
         // Create ranking indicator
         let ranking_indicator = match rank {
-            1..=3 if total_projects > 3 => RankingIndicator::Top { rank, total: total_projects },
-            r if r > total_projects * 2 / 3 => RankingIndicator::Bottom { rank, total: total_projects },
-            _ => RankingIndicator::Middle { rank, total: total_projects },
+            1..=3 if total_projects > 3 => RankingIndicator::Top {
+                rank,
+                total: total_projects,
+            },
+            r if r > total_projects * 2 / 3 => RankingIndicator::Bottom {
+                rank,
+                total: total_projects,
+            },
+            _ => RankingIndicator::Middle {
+                rank,
+                total: total_projects,
+            },
         };
 
         ActivityIndicators {
@@ -673,31 +706,44 @@ impl ActivityTimeline {
     }
 
     /// Generate visual activity indicators for a project (legacy method)
-    fn generate_activity_indicators(&self, project: &ProjectActivity, rank: usize, total_projects: usize) -> ActivityIndicators {
+    fn generate_activity_indicators(
+        &self,
+        project: &ProjectActivity,
+        rank: usize,
+        total_projects: usize,
+    ) -> ActivityIndicators {
         // Calculate progress bar value (activity score)
         let progress_bar = project.stats.activity_score;
 
         // Create bar segments for visualization
-        let user_messages = project.stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0);
-        let assistant_messages = project.stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0);
+        let user_messages = project
+            .stats
+            .messages_by_role
+            .get(&MessageRole::User)
+            .unwrap_or(&0);
+        let assistant_messages = project
+            .stats
+            .messages_by_role
+            .get(&MessageRole::Assistant)
+            .unwrap_or(&0);
         let total_msgs = project.stats.total_messages;
         let total_tools: usize = project.stats.tool_usage.values().sum();
 
         let mut bar_segments = Vec::new();
-        
+
         if total_msgs > 0 {
             bar_segments.push(BarSegment {
                 value: *user_messages as f64 / total_msgs as f64,
                 segment_type: SegmentType::UserMessages,
                 color_hint: "blue".to_string(),
             });
-            
+
             bar_segments.push(BarSegment {
                 value: *assistant_messages as f64 / total_msgs as f64,
                 segment_type: SegmentType::AssistantMessages,
                 color_hint: "green".to_string(),
             });
-            
+
             if total_tools > 0 {
                 bar_segments.push(BarSegment {
                     value: total_tools as f64 / total_msgs as f64,
@@ -715,9 +761,18 @@ impl ActivityTimeline {
 
         // Create ranking indicator
         let ranking_indicator = match rank {
-            1..=3 if total_projects > 3 => RankingIndicator::Top { rank, total: total_projects },
-            r if r > total_projects * 2 / 3 => RankingIndicator::Bottom { rank, total: total_projects },
-            _ => RankingIndicator::Middle { rank, total: total_projects },
+            1..=3 if total_projects > 3 => RankingIndicator::Top {
+                rank,
+                total: total_projects,
+            },
+            r if r > total_projects * 2 / 3 => RankingIndicator::Bottom {
+                rank,
+                total: total_projects,
+            },
+            _ => RankingIndicator::Middle {
+                rank,
+                total: total_projects,
+            },
         };
 
         ActivityIndicators {
@@ -730,7 +785,10 @@ impl ActivityTimeline {
     }
 
     /// Generate sparkline data showing daily activity from conversations
-    fn generate_sparkline_data_from_conversations(&self, conversations: &[ConversationSummary]) -> Vec<u32> {
+    fn generate_sparkline_data_from_conversations(
+        &self,
+        conversations: &[ConversationSummary],
+    ) -> Vec<u32> {
         // Create daily message count data for the last 7 days
         let mut daily_counts = vec![0u32; 7];
         let now = Utc::now();
@@ -786,7 +844,7 @@ impl ActivityTimeline {
             let mut chunk_results = Self::filter_conversations_by_time_period(chunk, period);
             results.append(&mut chunk_results);
         }
-        
+
         results
     }
 
@@ -807,7 +865,9 @@ impl ActivityTimeline {
                 } else if let Some(started_at) = conv.started_at {
                     period.contains(started_at)
                 } else {
-                    conv.messages.iter().any(|msg| period.contains(msg.timestamp))
+                    conv.messages
+                        .iter()
+                        .any(|msg| period.contains(msg.timestamp))
                 };
 
                 if !in_time_period {
@@ -876,7 +936,9 @@ impl ActivityTimeline {
         let new_end = new_period.end_time();
 
         if new_start < current_start || new_end > current_end {
-            return Err("Cannot filter to a period larger than the current timeline period".to_string());
+            return Err(
+                "Cannot filter to a period larger than the current timeline period".to_string(),
+            );
         }
 
         // Create new timeline with filtered data
@@ -894,8 +956,8 @@ impl ActivityTimeline {
                 .iter()
                 .filter(|conv| {
                     // Check if conversation activity falls within the new time period
-                    new_period.contains(conv.started_at) ||
-                    new_period.contains(conv.ended_at.unwrap_or(conv.started_at))
+                    new_period.contains(conv.started_at)
+                        || new_period.contains(conv.ended_at.unwrap_or(conv.started_at))
                 })
                 .cloned()
                 .collect();
@@ -914,7 +976,9 @@ impl ActivityTimeline {
                 // Recalculate stats for the filtered conversations
                 filtered_project.recalculate_stats(&new_period);
 
-                filtered_timeline.projects.insert(project_path.clone(), filtered_project);
+                filtered_timeline
+                    .projects
+                    .insert(project_path.clone(), filtered_project);
             }
         }
 
@@ -950,7 +1014,8 @@ impl ActivityTimeline {
                     .push(conv_summary.session_id.clone());
 
                 // Update activity heatmap
-                *temporal_index.activity_heatmap.entry(day_key).or_default() += conv_summary.message_count;
+                *temporal_index.activity_heatmap.entry(day_key).or_default() +=
+                    conv_summary.message_count;
             }
         }
 
@@ -972,11 +1037,8 @@ impl ProjectActivity {
 
         let stats = ProjectStats::from_conversations(&conversations);
         let topical_summary = TopicalSummary::from_conversations(&conversations, summary_depth);
-        
-        let last_activity = conversations
-            .iter()
-            .filter_map(|c| c.last_updated)
-            .max();
+
+        let last_activity = conversations.iter().filter_map(|c| c.last_updated).max();
 
         // Create visual indicators (placeholder - will be calculated in second pass)
         let indicators = ActivityIndicators {
@@ -1001,9 +1063,9 @@ impl ProjectActivity {
     pub fn recalculate_stats(&mut self, time_period: &TimePeriod) {
         // Reset stats
         self.stats = ProjectStats::default();
-        
+
         self.stats.conversation_count = self.conversations.len();
-        
+
         let mut total_length = 0;
         let mut hour_counts: HashMap<u8, usize> = HashMap::new();
         let mut _tool_counts: HashMap<String, usize> = HashMap::new();
@@ -1013,8 +1075,16 @@ impl ProjectActivity {
             self.stats.total_messages += conv_summary.message_count;
 
             // Count messages by role (approximate from conversation summary)
-            *self.stats.messages_by_role.entry(MessageRole::User).or_default() += conv_summary.user_message_count;
-            *self.stats.messages_by_role.entry(MessageRole::Assistant).or_default() += conv_summary.assistant_message_count;
+            *self
+                .stats
+                .messages_by_role
+                .entry(MessageRole::User)
+                .or_default() += conv_summary.user_message_count;
+            *self
+                .stats
+                .messages_by_role
+                .entry(MessageRole::Assistant)
+                .or_default() += conv_summary.assistant_message_count;
 
             // Track hour activity
             let hour = conv_summary.started_at.hour() as u8;
@@ -1043,16 +1113,26 @@ impl ProjectActivity {
             TimePeriod::LastTwoDay => 2.0,
             TimePeriod::LastWeek => 7.0,
             TimePeriod::LastMonth => 30.0,
-            TimePeriod::Custom { start, end } => (end.signed_duration_since(*start).num_days() as f64).max(1.0),
+            TimePeriod::Custom { start, end } => {
+                (end.signed_duration_since(*start).num_days() as f64).max(1.0)
+            }
         };
 
         self.stats.conversation_frequency = self.conversations.len() as f64 / period_days;
         self.stats.message_frequency = self.stats.total_messages as f64 / period_days;
 
         // Calculate user to assistant ratio
-        let user_count = *self.stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0) as f64;
-        let assistant_count = *self.stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0) as f64;
-        
+        let user_count = *self
+            .stats
+            .messages_by_role
+            .get(&MessageRole::User)
+            .unwrap_or(&0) as f64;
+        let assistant_count = *self
+            .stats
+            .messages_by_role
+            .get(&MessageRole::Assistant)
+            .unwrap_or(&0) as f64;
+
         self.stats.user_assistant_ratio = if assistant_count > 0.0 {
             user_count / assistant_count
         } else {
@@ -1075,23 +1155,24 @@ impl ConversationSummary {
             message_count: conversation.messages.len(),
             user_message_count: conversation.user_message_count(),
             assistant_message_count: conversation.assistant_message_count(),
-            tool_usage_count: conversation.messages.iter()
+            tool_usage_count: conversation
+                .messages
+                .iter()
                 .map(|m| m.tool_uses.len())
                 .sum(),
             topics,
             content_summary,
         }
     }
-
 }
 
 impl ProjectStats {
     /// Generate project statistics from conversations
     pub fn from_conversations(conversations: &[Conversation]) -> Self {
         let mut stats = Self::default();
-        
+
         stats.conversation_count = conversations.len();
-        
+
         let mut total_length = 0;
         let mut hour_counts: HashMap<u8, usize> = HashMap::new();
         let mut tool_counts: HashMap<String, usize> = HashMap::new();
@@ -1102,7 +1183,10 @@ impl ProjectStats {
 
             // Count messages by role
             for message in &conversation.messages {
-                *stats.messages_by_role.entry(message.role.clone()).or_default() += 1;
+                *stats
+                    .messages_by_role
+                    .entry(message.role.clone())
+                    .or_default() += 1;
 
                 // Track hour activity
                 let hour = message.timestamp.hour() as u8;
@@ -1137,7 +1221,10 @@ impl ProjectStats {
 
         // Calculate user to assistant ratio
         let user_messages = stats.messages_by_role.get(&MessageRole::User).unwrap_or(&0);
-        let assistant_messages = stats.messages_by_role.get(&MessageRole::Assistant).unwrap_or(&0);
+        let assistant_messages = stats
+            .messages_by_role
+            .get(&MessageRole::Assistant)
+            .unwrap_or(&0);
         stats.user_assistant_ratio = if *assistant_messages > 0 {
             *user_messages as f64 / *assistant_messages as f64
         } else {
@@ -1162,17 +1249,12 @@ impl ProjectStats {
 
 impl TopicalSummary {
     /// Generate topical summary from conversations
-    pub fn from_conversations(
-        conversations: &[Conversation],
-        depth: SummaryDepth,
-    ) -> Self {
+    pub fn from_conversations(conversations: &[Conversation], depth: SummaryDepth) -> Self {
         let main_topics = extract_topics_from_conversations(conversations);
         let summary_text = generate_project_summary(conversations, depth);
         let frequent_tools = extract_frequent_tools(conversations);
-        
-        let total_messages: usize = conversations.iter()
-            .map(|c| c.messages.len())
-            .sum();
+
+        let total_messages: usize = conversations.iter().map(|c| c.messages.len()).sum();
 
         let intensity = match total_messages {
             0..=4 => ActivityIntensity::Low,
@@ -1206,63 +1288,152 @@ impl TextAnalyzer {
             "can", "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they",
             "me", "him", "her", "us", "them", "my", "your", "his", "her", "its", "our", "their",
             "what", "which", "who", "when", "where", "why", "how", "all", "any", "some", "no",
-            "not", "very", "so", "just", "now", "then", "here", "there", "up", "out", "if", "about",
-            "into", "over", "after", "more", "most", "other", "such", "only", "own", "same", "too",
-            "each", "much", "many", "most", "more", "get", "go", "make", "take", "come", "see",
-            "know", "think", "look", "want", "give", "use", "find", "tell", "ask", "work", "seem",
-            "feel", "try", "leave", "call"
-        ].iter().map(|&s| s.to_string()).collect();
+            "not", "very", "so", "just", "now", "then", "here", "there", "up", "out", "if",
+            "about", "into", "over", "after", "more", "most", "other", "such", "only", "own",
+            "same", "too", "each", "much", "many", "most", "more", "get", "go", "make", "take",
+            "come", "see", "know", "think", "look", "want", "give", "use", "find", "tell", "ask",
+            "work", "seem", "feel", "try", "leave", "call",
+        ]
+        .iter()
+        .map(|&s| s.to_string())
+        .collect();
 
         let technical_terms = [
-            "rust", "python", "javascript", "typescript", "java", "cpp", "csharp", "go", "kotlin",
-            "swift", "ruby", "php", "html", "css", "sql", "nosql", "mongodb", "postgresql", "mysql",
-            "redis", "elasticsearch", "docker", "kubernetes", "aws", "azure", "gcp", "terraform",
-            "ansible", "jenkins", "gitlab", "github", "git", "svn", "mercurial", "linux", "ubuntu",
-            "centos", "debian", "windows", "macos", "ios", "android", "react", "vue", "angular",
-            "node", "express", "django", "flask", "spring", "laravel", "rails", "django", "fastapi",
-            "api", "rest", "graphql", "microservices", "serverless", "lambda", "function", "service",
-            "database", "cache", "queue", "message", "event", "stream", "batch", "pipeline", "etl",
-            "ml", "ai", "neural", "model", "algorithm", "data", "analytics", "visualization"
-        ].iter().map(|&s| s.to_string()).collect();
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "java",
+            "cpp",
+            "csharp",
+            "go",
+            "kotlin",
+            "swift",
+            "ruby",
+            "php",
+            "html",
+            "css",
+            "sql",
+            "nosql",
+            "mongodb",
+            "postgresql",
+            "mysql",
+            "redis",
+            "elasticsearch",
+            "docker",
+            "kubernetes",
+            "aws",
+            "azure",
+            "gcp",
+            "terraform",
+            "ansible",
+            "jenkins",
+            "gitlab",
+            "github",
+            "git",
+            "svn",
+            "mercurial",
+            "linux",
+            "ubuntu",
+            "centos",
+            "debian",
+            "windows",
+            "macos",
+            "ios",
+            "android",
+            "react",
+            "vue",
+            "angular",
+            "node",
+            "express",
+            "django",
+            "flask",
+            "spring",
+            "laravel",
+            "rails",
+            "django",
+            "fastapi",
+            "api",
+            "rest",
+            "graphql",
+            "microservices",
+            "serverless",
+            "lambda",
+            "function",
+            "service",
+            "database",
+            "cache",
+            "queue",
+            "message",
+            "event",
+            "stream",
+            "batch",
+            "pipeline",
+            "etl",
+            "ml",
+            "ai",
+            "neural",
+            "model",
+            "algorithm",
+            "data",
+            "analytics",
+            "visualization",
+        ]
+        .iter()
+        .map(|&s| s.to_string())
+        .collect();
 
-        Self { stop_words, technical_terms }
+        Self {
+            stop_words,
+            technical_terms,
+        }
     }
 
     /// Extract key phrases from text using frequency and position analysis
     fn extract_key_phrases(&self, text: &str, max_phrases: usize) -> Vec<String> {
         let cleaned_text = self.clean_text(text);
         let words = self.tokenize(&cleaned_text);
-        
+
         // Extract single word topics
         let mut word_scores = HashMap::new();
         let total_words = words.len() as f64;
-        
+
         for (pos, word) in words.iter().enumerate() {
             if self.is_meaningful_word(word) {
                 let position_weight = 1.0 - (pos as f64 / total_words * 0.3); // Earlier words are more important
-                let technical_bonus = if self.technical_terms.contains(word) { 2.0 } else { 1.0 };
+                let technical_bonus = if self.technical_terms.contains(word) {
+                    2.0
+                } else {
+                    1.0
+                };
                 let length_bonus = if word.len() > 6 { 1.5 } else { 1.0 };
-                
-                *word_scores.entry(word.clone()).or_default() += position_weight * technical_bonus * length_bonus;
+
+                *word_scores.entry(word.clone()).or_default() +=
+                    position_weight * technical_bonus * length_bonus;
             }
         }
-        
+
         // Extract two-word phrases
         let mut phrase_scores = HashMap::new();
         for window in words.windows(2) {
-            if window.len() == 2 && self.is_meaningful_word(&window[0]) && self.is_meaningful_word(&window[1]) {
+            if window.len() == 2
+                && self.is_meaningful_word(&window[0])
+                && self.is_meaningful_word(&window[1])
+            {
                 let phrase = format!("{} {}", window[0], window[1]);
                 *phrase_scores.entry(phrase).or_default() += 1.5; // Phrases are often more meaningful
             }
         }
-        
+
         // Combine and rank results
-        let mut all_topics: Vec<(String, f64)> = word_scores.into_iter()
+        let mut all_topics: Vec<(String, f64)> = word_scores
+            .into_iter()
             .chain(phrase_scores.into_iter())
             .collect();
-            
+
         all_topics.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        all_topics.into_iter()
+        all_topics
+            .into_iter()
             .take(max_phrases)
             .map(|(phrase, _)| phrase)
             .collect()
@@ -1270,50 +1441,55 @@ impl TextAnalyzer {
 
     /// Extract topics using TF-IDF analysis across multiple documents
     fn extract_topics_with_tfidf(
-        &self, 
-        documents: &[String], 
+        &self,
+        documents: &[String],
         _contexts: &HashMap<String, String>,
-        max_topics: usize
+        max_topics: usize,
     ) -> Vec<Topic> {
         let mut term_frequencies = HashMap::new();
         let mut document_frequencies: HashMap<String, usize> = HashMap::new();
         let total_docs = documents.len() as f64;
-        
+
         // Calculate term frequencies and document frequencies
         for doc in documents {
             let words = self.tokenize(&self.clean_text(doc));
             let mut doc_terms = HashSet::new();
-            
+
             for word in &words {
                 if self.is_meaningful_word(word) {
                     *term_frequencies.entry(word.clone()).or_default() += 1;
                     doc_terms.insert(word.clone());
                 }
             }
-            
+
             // Count document frequency (how many documents contain each term)
             for term in doc_terms {
                 *document_frequencies.entry(term).or_default() += 1;
             }
         }
-        
+
         // Calculate TF-IDF scores
         let mut tfidf_scores = HashMap::new();
         for (term, tf) in &term_frequencies {
             if let Some(&df) = document_frequencies.get(term) {
                 let idf = (total_docs / df as f64).ln();
                 let tfidf = *tf as f64 * idf;
-                
+
                 // Apply additional scoring factors
-                let technical_bonus = if self.technical_terms.contains(term) { 2.0 } else { 1.0 };
+                let technical_bonus = if self.technical_terms.contains(term) {
+                    2.0
+                } else {
+                    1.0
+                };
                 let length_bonus = if term.len() > 6 { 1.3 } else { 1.0 };
-                
+
                 tfidf_scores.insert(term.clone(), tfidf * technical_bonus * length_bonus);
             }
         }
-        
+
         // Convert to Topic structures
-        let mut topics: Vec<Topic> = tfidf_scores.into_iter()
+        let mut topics: Vec<Topic> = tfidf_scores
+            .into_iter()
             .map(|(term, score)| {
                 let frequency = term_frequencies.get(&term).copied().unwrap_or(0);
                 Topic {
@@ -1324,10 +1500,10 @@ impl TextAnalyzer {
                 }
             })
             .collect();
-            
+
         topics.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap());
         topics.truncate(max_topics);
-        
+
         topics
     }
 
@@ -1335,7 +1511,13 @@ impl TextAnalyzer {
     fn clean_text(&self, text: &str) -> String {
         text.to_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c.is_whitespace() {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect::<String>()
             .split_whitespace()
             .collect::<Vec<&str>>()
@@ -1352,10 +1534,10 @@ impl TextAnalyzer {
 
     /// Check if a word is meaningful for topic extraction
     fn is_meaningful_word(&self, word: &str) -> bool {
-        word.len() > 2 && 
-        !self.stop_words.contains(word) &&
-        !word.chars().all(|c| c.is_numeric()) &&
-        word.chars().any(|c| c.is_alphabetic())
+        word.len() > 2
+            && !self.stop_words.contains(word)
+            && !word.chars().all(|c| c.is_numeric())
+            && word.chars().any(|c| c.is_alphabetic())
     }
 
     /// Find a context sample for a given term
@@ -1381,70 +1563,72 @@ impl TextAnalyzer {
 // Advanced text analysis for topic extraction
 fn extract_topics_from_conversation(conversation: &Conversation) -> Vec<String> {
     let analyzer = TextAnalyzer::new();
-    
+
     // Collect all relevant text content
     let mut text_content = Vec::new();
-    
+
     // Include summary if available
     if let Some(summary) = &conversation.summary {
         text_content.push(summary.clone());
     }
-    
+
     // Include user messages (these often contain the main topics/questions)
     for message in &conversation.messages {
         if message.role == MessageRole::User && !message.content.trim().is_empty() {
             text_content.push(message.content.clone());
         }
     }
-    
+
     // Include first assistant message (often contains topic acknowledgment)
-    if let Some(first_assistant) = conversation.messages
+    if let Some(first_assistant) = conversation
+        .messages
         .iter()
-        .find(|m| m.role == MessageRole::Assistant) {
+        .find(|m| m.role == MessageRole::Assistant)
+    {
         text_content.push(first_assistant.content.clone());
     }
-    
+
     // Extract topics using text analysis
     if text_content.is_empty() {
         return vec!["General discussion".to_string()];
     }
-    
+
     let combined_text = text_content.join(" ");
     analyzer.extract_key_phrases(&combined_text, 3)
 }
 
 fn extract_topics_from_conversations(conversations: &[Conversation]) -> Vec<Topic> {
     let analyzer = TextAnalyzer::new();
-    
+
     // Collect all text content from conversations
     let mut all_content = Vec::new();
     let mut conversation_contexts = HashMap::new();
-    
+
     for conversation in conversations {
         let mut conv_content = Vec::new();
-        
+
         // Prioritize user messages and summaries for topic extraction
         if let Some(summary) = &conversation.summary {
             conv_content.push(summary.clone());
         }
-        
+
         for message in &conversation.messages {
             if message.role == MessageRole::User {
                 conv_content.push(message.content.clone());
             }
         }
-        
+
         let combined = conv_content.join(" ");
         if !combined.trim().is_empty() {
             all_content.push(combined.clone());
             conversation_contexts.insert(combined.clone(), conversation.session_id.clone());
         }
     }
-    
+
     if all_content.is_empty() {
         return Vec::new();
     }
-    
+
     // Use TF-IDF-like analysis for topic extraction
     analyzer.extract_topics_with_tfidf(&all_content, &conversation_contexts, 10)
 }
@@ -1453,12 +1637,12 @@ fn extract_topics_from_conversations(conversations: &[Conversation]) -> Vec<Topi
 fn normalize_project_path(path: &str) -> String {
     // Remove trailing slashes and normalize separators
     let normalized = path.trim_end_matches('/').replace('\\', "/");
-    
+
     // Handle empty paths
     if normalized.is_empty() {
         return "unknown".to_string();
     }
-    
+
     // Extract meaningful project name from path
     // For paths like "/Users/name/projects/my-project", extract "my-project"
     // For paths like "projects/subfolder/my-project", extract "my-project"
@@ -1467,7 +1651,7 @@ fn normalize_project_path(path: &str) -> String {
             return last_segment.to_string();
         }
     }
-    
+
     // Fallback to full normalized path
     normalized
 }
@@ -1476,12 +1660,13 @@ fn generate_content_summary(conversation: &Conversation) -> String {
     if let Some(summary) = &conversation.summary {
         summary.clone()
     } else if !conversation.messages.is_empty() {
-        let first_user_msg = conversation.messages
+        let first_user_msg = conversation
+            .messages
             .iter()
             .find(|m| m.role == MessageRole::User)
             .map(|m| &m.content)
             .unwrap_or(&conversation.messages[0].content);
-        
+
         // Take first 100 characters
         if first_user_msg.len() > 100 {
             format!("{}...", &first_user_msg[..97])
@@ -1501,11 +1686,11 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
     let _analyzer = TextAnalyzer::new();
     let total_messages: usize = conversations.iter().map(|c| c.messages.len()).sum();
     let total_conversations = conversations.len();
-    
+
     // Extract key topics for context
     let topics = extract_topics_from_conversations(conversations);
     let main_topics: Vec<String> = topics.into_iter().take(3).map(|t| t.name).collect();
-    
+
     // Analyze tool usage patterns
     let tools_used: HashSet<_> = conversations
         .iter()
@@ -1513,7 +1698,7 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
         .flat_map(|m| &m.tool_uses)
         .map(|t| &t.name)
         .collect();
-    
+
     // Calculate activity patterns
     let avg_messages_per_conv = total_messages as f64 / total_conversations as f64;
     let user_messages: usize = conversations
@@ -1521,7 +1706,7 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
         .flat_map(|c| &c.messages)
         .filter(|m| m.role == MessageRole::User)
         .count();
-    
+
     match depth {
         SummaryDepth::Brief => {
             let topic_summary = if main_topics.is_empty() {
@@ -1529,7 +1714,7 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
             } else {
                 &main_topics[0]
             };
-            
+
             format!(
                 "{} conversations with {} messages focusing on {}.",
                 total_conversations, total_messages, topic_summary
@@ -1541,23 +1726,32 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
             } else {
                 main_topics.join(", ")
             };
-            
+
             let tools_text = if tools_used.is_empty() {
                 "standard development tools".to_string()
             } else {
-                tools_used.into_iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                tools_used
+                    .into_iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
-            
+
             format!(
                 "{} conversations generated {} messages (avg {:.1} per conversation). \
                 Key topics: {}. Primary tools: {}. \
                 Activity shows {} interaction pattern.",
-                total_conversations, 
+                total_conversations,
                 total_messages,
                 avg_messages_per_conv,
                 topics_text,
                 tools_text,
-                if avg_messages_per_conv > 10.0 { "intensive" } else { "focused" }
+                if avg_messages_per_conv > 10.0 {
+                    "intensive"
+                } else {
+                    "focused"
+                }
             )
         }
         SummaryDepth::Comprehensive => {
@@ -1566,17 +1760,18 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
             } else {
                 format!("Primary focus areas include: {}.", main_topics.join(", "))
             };
-            
-            let tools_analysis = if tools_used.is_empty() {
-                "No specific tools were used in these conversations.".to_string()
-            } else {
-                format!(
+
+            let tools_analysis =
+                if tools_used.is_empty() {
+                    "No specific tools were used in these conversations.".to_string()
+                } else {
+                    format!(
                     "Tool usage includes {} different tools, with {} being most frequently used.",
                     tools_used.len(),
                     tools_used.into_iter().take(3).cloned().collect::<Vec<_>>().join(", ")
                 )
-            };
-            
+                };
+
             let interaction_analysis = format!(
                 "Conversation patterns show {} interactions with an average of {:.1} messages per conversation. \
                 User initiated {} queries, suggesting {} engagement level.",
@@ -1585,10 +1780,14 @@ fn generate_project_summary(conversations: &[Conversation], depth: SummaryDepth)
                 user_messages,
                 if user_messages as f64 / total_messages as f64 > 0.4 { "high" } else { "standard" }
             );
-            
+
             format!(
                 "Comprehensive analysis of {} conversations with {} total messages. {} {} {}",
-                total_conversations, total_messages, topics_text, tools_analysis, interaction_analysis
+                total_conversations,
+                total_messages,
+                topics_text,
+                tools_analysis,
+                interaction_analysis
             )
         }
     }
@@ -1617,7 +1816,7 @@ fn calculate_avg_session_duration(conversations: &[Conversation]) -> Option<f64>
 
 fn extract_frequent_tools(conversations: &[Conversation]) -> Vec<String> {
     let mut tool_counts: HashMap<String, usize> = HashMap::new();
-    
+
     for conversation in conversations {
         for message in &conversation.messages {
             for tool_use in &message.tool_uses {
@@ -1625,7 +1824,7 @@ fn extract_frequent_tools(conversations: &[Conversation]) -> Vec<String> {
             }
         }
     }
-    
+
     let mut tools: Vec<_> = tool_counts.into_iter().collect();
     tools.sort_by(|a, b| b.1.cmp(&a.1));
     tools.into_iter().take(5).map(|(name, _)| name).collect()
@@ -1641,7 +1840,7 @@ mod tests {
         let now = Utc::now();
         let yesterday = now - Duration::days(1);
         let two_days_ago = now - Duration::days(2);
-        
+
         let period = TimePeriod::LastDay;
         assert!(period.contains(yesterday + Duration::hours(1)));
         assert!(!period.contains(two_days_ago));
@@ -1658,7 +1857,7 @@ mod tests {
     fn test_activity_timeline_creation() {
         let config = TimelineConfig::default();
         let timeline = ActivityTimeline::new(config.clone());
-        
+
         assert_eq!(timeline.config.period, config.period);
         assert!(timeline.projects.is_empty());
         assert_eq!(timeline.total_stats.active_projects, 0);
@@ -1696,7 +1895,10 @@ mod tests {
 
     #[test]
     fn test_normalize_project_path() {
-        assert_eq!(normalize_project_path("/users/john/projects/my-app/"), "my-app");
+        assert_eq!(
+            normalize_project_path("/users/john/projects/my-app/"),
+            "my-app"
+        );
         assert_eq!(normalize_project_path("C:\\projects\\my-app"), "my-app");
         assert_eq!(normalize_project_path("my-project"), "my-project");
         assert_eq!(normalize_project_path(""), "unknown");
@@ -1708,29 +1910,29 @@ mod tests {
         let now = Utc::now();
         let conversations = vec![
             create_test_conversation("conv1", now - Duration::hours(1)), // Within 24h
-            create_test_conversation("conv2", now - Duration::hours(36)), // Within 48h but not 24h  
+            create_test_conversation("conv2", now - Duration::hours(36)), // Within 48h but not 24h
             create_test_conversation("conv3", now - Duration::days(8)),  // Outside week
         ];
 
         // Test 24h filtering
         let filtered_24h = ActivityTimeline::filter_conversations_by_time_period(
-            &conversations, 
-            TimePeriod::LastDay
+            &conversations,
+            TimePeriod::LastDay,
         );
         assert_eq!(filtered_24h.len(), 1);
         assert_eq!(filtered_24h[0].session_id, "conv1");
 
-        // Test 48h filtering  
+        // Test 48h filtering
         let filtered_48h = ActivityTimeline::filter_conversations_by_time_period(
             &conversations,
-            TimePeriod::LastTwoDay
+            TimePeriod::LastTwoDay,
         );
         assert_eq!(filtered_48h.len(), 2);
 
         // Test week filtering
         let filtered_week = ActivityTimeline::filter_conversations_by_time_period(
             &conversations,
-            TimePeriod::LastWeek
+            TimePeriod::LastWeek,
         );
         assert_eq!(filtered_week.len(), 2);
     }
@@ -1820,7 +2022,7 @@ mod tests {
         assert_eq!(timeline.projects.len(), 2);
         assert!(timeline.projects.contains_key("app1"));
         assert!(timeline.projects.contains_key("app2"));
-        
+
         // Check statistics
         assert_eq!(timeline.total_stats.active_projects, 2);
         assert_eq!(timeline.total_stats.total_conversations, 3);
@@ -1851,10 +2053,10 @@ mod tests {
     }
 
     fn create_test_conversation_with_tools(
-        session_id: &str, 
-        timestamp: DateTime<Utc>, 
+        session_id: &str,
+        timestamp: DateTime<Utc>,
         message_count: usize,
-        has_tools: bool
+        has_tools: bool,
     ) -> Conversation {
         let mut messages = Vec::new();
         for i in 0..message_count {
@@ -1881,7 +2083,7 @@ mod tests {
 
     fn create_test_message(timestamp: DateTime<Utc>) -> crate::claude::ConversationMessage {
         use crate::claude::ConversationMessage;
-        
+
         ConversationMessage {
             uuid: format!("msg-{}", timestamp.timestamp()),
             parent_uuid: None,
@@ -1896,14 +2098,14 @@ mod tests {
     #[test]
     fn test_text_analyzer_basic_functionality() {
         let analyzer = TextAnalyzer::new();
-        
+
         // Test meaningful word detection
         assert!(analyzer.is_meaningful_word("programming"));
         assert!(analyzer.is_meaningful_word("rust"));
         assert!(!analyzer.is_meaningful_word("the"));
         assert!(!analyzer.is_meaningful_word("123"));
         assert!(!analyzer.is_meaningful_word("a"));
-        
+
         // Test text cleaning
         let cleaned = analyzer.clean_text("Hello, World! This is a test.");
         assert_eq!(cleaned, "hello world this is a test");
@@ -1913,9 +2115,9 @@ mod tests {
     fn test_key_phrase_extraction() {
         let analyzer = TextAnalyzer::new();
         let text = "I need help with Rust programming. Specifically working with async functions and error handling in Rust applications.";
-        
+
         let phrases = analyzer.extract_key_phrases(text, 5);
-        
+
         // Should extract meaningful technical terms
         assert!(!phrases.is_empty());
         // Rust should be highly ranked due to technical term bonus
@@ -1931,9 +2133,9 @@ mod tests {
             "Rust async programming best practices".to_string(),
         ];
         let contexts = HashMap::new();
-        
+
         let topics = analyzer.extract_topics_with_tfidf(&documents, &contexts, 5);
-        
+
         assert!(!topics.is_empty());
         // Should identify "rust" and "async" as key topics
         let topic_names: Vec<_> = topics.iter().map(|t| &t.name).collect();
@@ -1945,16 +2147,16 @@ mod tests {
         let now = Utc::now();
         let conversations = vec![
             create_test_conversation_with_content(
-                "conv1", 
+                "conv1",
                 "Help me debug a Rust async function",
                 "I'm having trouble with async/await in Rust. The function keeps hanging.",
-                now
+                now,
             ),
             create_test_conversation_with_content(
                 "conv2",
                 "Python error handling",
                 "What's the best way to handle exceptions in Python web applications?",
-                now
+                now,
             ),
         ];
 
@@ -1969,7 +2171,8 @@ mod tests {
         assert!(detailed_summary.len() > brief_summary.len());
 
         // Test comprehensive summary
-        let comprehensive_summary = generate_project_summary(&conversations, SummaryDepth::Comprehensive);
+        let comprehensive_summary =
+            generate_project_summary(&conversations, SummaryDepth::Comprehensive);
         assert!(comprehensive_summary.contains("Comprehensive analysis"));
         assert!(comprehensive_summary.len() > detailed_summary.len());
     }
@@ -1977,14 +2180,12 @@ mod tests {
     #[test]
     fn test_project_activity_topic_extraction() {
         let now = Utc::now();
-        let conversations = vec![
-            create_test_conversation_with_content(
-                "conv1",
-                "Rust async programming help",
-                "I need assistance with async Rust programming patterns",
-                now
-            ),
-        ];
+        let conversations = vec![create_test_conversation_with_content(
+            "conv1",
+            "Rust async programming help",
+            "I need assistance with async Rust programming patterns",
+            now,
+        )];
 
         let project_activity = ProjectActivity::from_conversations(
             "test-project".to_string(),
@@ -1995,7 +2196,7 @@ mod tests {
         // Should have extracted meaningful topics
         assert!(!project_activity.topical_summary.main_topics.is_empty());
         assert!(!project_activity.topical_summary.summary_text.is_empty());
-        
+
         // Activity intensity should be calculated
         assert!(matches!(
             project_activity.topical_summary.intensity,
@@ -2007,7 +2208,7 @@ mod tests {
     fn test_performance_large_conversation_set() {
         let now = Utc::now();
         let start_time = std::time::Instant::now();
-        
+
         // Create a moderately large set of conversations for performance testing
         let conversations: Vec<_> = (0..20)
             .map(|i| create_test_conversation_with_content(
@@ -2021,20 +2222,24 @@ mod tests {
         // Generate comprehensive summaries
         let _summary = generate_project_summary(&conversations, SummaryDepth::Comprehensive);
         let _topics = extract_topics_from_conversations(&conversations);
-        
+
         let elapsed = start_time.elapsed();
-        
+
         // Should complete within reasonable time (much less than 2s for this small test)
-        assert!(elapsed.as_millis() < 1000, "Summary generation took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 1000,
+            "Summary generation took too long: {:?}",
+            elapsed
+        );
     }
 
     #[test]
     fn test_empty_conversations_handling() {
         let empty_conversations = vec![];
-        
+
         let summary = generate_project_summary(&empty_conversations, SummaryDepth::Brief);
         assert_eq!(summary, "No activity in this time period");
-        
+
         let topics = extract_topics_from_conversations(&empty_conversations);
         assert!(topics.is_empty());
     }
@@ -2047,7 +2252,7 @@ mod tests {
         timestamp: DateTime<Utc>,
     ) -> Conversation {
         use crate::claude::ConversationMessage;
-        
+
         let messages = vec![
             ConversationMessage {
                 uuid: format!("{}-user", session_id),
@@ -2062,7 +2267,10 @@ mod tests {
                 uuid: format!("{}-assistant", session_id),
                 parent_uuid: Some(format!("{}-user", session_id)),
                 role: MessageRole::Assistant,
-                content: format!("I can help you with {}. Let me provide some guidance.", summary.to_lowercase()),
+                content: format!(
+                    "I can help you with {}. Let me provide some guidance.",
+                    summary.to_lowercase()
+                ),
                 timestamp: timestamp + Duration::minutes(1),
                 model: Some("claude-3".to_string()),
                 tool_uses: vec![],

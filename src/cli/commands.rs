@@ -1,8 +1,14 @@
 use crate::claude::conversation::MessageRole as ConvMessageRole;
-use crate::claude::{ClaudeDirectory, ConversationParser, AnalyticsEngine, ConversationExporter, ExportConfig, ActivityTimeline, TimelineConfig, TimePeriod, SummaryDepth};
-use crate::cli::args::{Commands, MessageRole, OutputFormat, ExportFormat, ConversationExportFormat, TimelinePeriod, McpAction, ServerStatusFilter, ServerSortField};
-use crate::mcp::{ServerDiscovery, McpServer, ServerStatus};
+use crate::claude::{
+    ActivityTimeline, AnalyticsEngine, ClaudeDirectory, ConversationExporter, ConversationParser,
+    ExportConfig, SummaryDepth, TimePeriod, TimelineConfig,
+};
+use crate::cli::args::{
+    Commands, ConversationExportFormat, ExportFormat, McpAction, MessageRole, OutputFormat,
+    ServerSortField, ServerStatusFilter, TimelinePeriod,
+};
 use crate::errors::Result;
+use crate::mcp::{McpServer, ServerDiscovery, ServerStatus};
 use crate::ui::{App, Event, EventHandler};
 use crossterm::{
     execute,
@@ -31,19 +37,64 @@ pub fn execute_command(
             include_metadata,
             include_tools,
             include_timestamps,
-        } => execute_show(claude_dir, conversation_id, format, role, export, output, include_metadata, include_tools, include_timestamps, verbose),
+        } => execute_show(
+            claude_dir,
+            conversation_id,
+            format,
+            role,
+            export,
+            output,
+            include_metadata,
+            include_tools,
+            include_timestamps,
+            verbose,
+        ),
         Commands::Search {
             query,
             regex,
             ignore_case,
             context,
-        } => execute_search(claude_dir, query, regex, ignore_case, context, verbose),
+            model,
+            tool,
+            role,
+            after,
+            before,
+            min_messages,
+            max_messages,
+            min_duration,
+            max_duration,
+            limit,
+        } => execute_search(
+            claude_dir,
+            query,
+            regex,
+            ignore_case,
+            context,
+            model,
+            tool,
+            role,
+            after,
+            before,
+            min_messages,
+            max_messages,
+            min_duration,
+            max_duration,
+            limit,
+            verbose,
+        ),
         Commands::Stats {
             conversation_id,
             global,
             export,
             detailed,
-        } => execute_stats(claude_dir, conversation_id, global, export, detailed, verbose),
+        } => execute_stats(
+            claude_dir,
+            conversation_id,
+            global,
+            export,
+            detailed,
+            verbose,
+        ),
         Commands::Timeline {
             period,
             detailed,
@@ -52,7 +103,17 @@ pub fn execute_command(
             output,
             max_conversations,
             include_empty,
-        } => execute_timeline(claude_dir, period, detailed, format, export, output, max_conversations, include_empty, verbose),
+        } => execute_timeline(
+            claude_dir,
+            period,
+            detailed,
+            format,
+            export,
+            output,
+            max_conversations,
+            include_empty,
+            verbose,
+        ),
         Commands::Interactive => execute_interactive(claude_dir, verbose),
         Commands::Mcp { action } => execute_mcp(action, verbose),
     }
@@ -139,13 +200,13 @@ fn execute_show(
             // Handle export functionality first
             if let Some(export_format) = export {
                 return handle_conversation_export(
-                    &conversation, 
-                    export_format, 
-                    output, 
-                    include_metadata, 
-                    include_tools, 
-                    include_timestamps, 
-                    verbose
+                    &conversation,
+                    export_format,
+                    output,
+                    include_metadata,
+                    include_tools,
+                    include_timestamps,
+                    verbose,
                 );
             }
 
@@ -232,20 +293,131 @@ fn execute_show(
 fn execute_search(
     claude_dir: ClaudeDirectory,
     query: String,
-    _regex: bool,
-    _ignore_case: bool,
+    regex: bool,
+    ignore_case: bool,
     _context: usize,
+    model: Option<String>,
+    tool: Option<String>,
+    role: Option<MessageRole>,
+    after: Option<String>,
+    before: Option<String>,
+    min_messages: Option<usize>,
+    max_messages: Option<usize>,
+    min_duration: Option<u32>,
+    max_duration: Option<u32>,
+    limit: usize,
     verbose: bool,
 ) -> Result<()> {
+    use crate::claude::search::{
+        BooleanQueryParser, DateRange, MessageRole as SearchRole, SearchEngine, SearchMode,
+        SearchQuery,
+    };
+    use chrono::{DateTime, Utc};
+
     if verbose {
-        eprintln!("Searching for: {}", query);
+        eprintln!("🔍 Searching for: {}", query);
+        if model.is_some() || tool.is_some() || after.is_some() || before.is_some() {
+            eprintln!(
+                "📊 Filters applied: model={:?}, tool={:?}, date_range={:?}-{:?}",
+                model, tool, after, before
+            );
+        }
     }
 
+    // Parse conversations and build search index
     let parser = ConversationParser::new(claude_dir);
-    let results = parser.search_conversations(&query)?;
+    let conversations = parser.parse_all_conversations()?;
+
+    let mut search_engine = SearchEngine::new();
+    search_engine.build_index(conversations)?;
+
+    // Build search query
+    let mut search_query = SearchQuery::default();
+
+    // Determine search mode and set query
+    if regex {
+        search_query.regex_pattern = Some(query.clone());
+        search_query.search_mode = SearchMode::Regex;
+    } else if query.contains("AND")
+        || query.contains("OR")
+        || query.contains("NOT")
+        || query.contains('(')
+    {
+        // Try boolean search if it looks like boolean syntax
+        match BooleanQueryParser::parse(&query) {
+            Ok(boolean_query) => {
+                search_query.boolean_query = Some(boolean_query);
+                search_query.search_mode = SearchMode::Advanced;
+            }
+            Err(_) => {
+                // Fall back to text search if boolean parsing fails
+                search_query.text = Some(query.clone());
+                search_query.search_mode = if ignore_case {
+                    SearchMode::Text
+                } else {
+                    SearchMode::Text
+                };
+            }
+        }
+    } else {
+        search_query.text = Some(query.clone());
+        search_query.search_mode = SearchMode::Text;
+    }
+
+    // Apply filters
+    if let Some(model_filter) = model {
+        search_query.model_filter = Some(model_filter);
+    }
+
+    if let Some(tool_filter) = tool {
+        search_query.tool_filter = Some(tool_filter);
+    }
+
+    if let Some(role_filter) = role {
+        let search_role = match role_filter {
+            MessageRole::User => SearchRole::User,
+            MessageRole::Assistant => SearchRole::Assistant,
+            MessageRole::System => SearchRole::System,
+            MessageRole::Tool => SearchRole::Tool,
+        };
+        search_query.message_role_filter = Some(search_role);
+    }
+
+    // Parse date filters
+    let mut date_range = DateRange {
+        start: None,
+        end: None,
+    };
+    if let Some(after_str) = after {
+        if let Ok(date) = parse_date_string(&after_str) {
+            date_range.start = Some(date);
+        } else {
+            eprintln!("⚠️  Warning: Could not parse 'after' date: {}", after_str);
+        }
+    }
+    if let Some(before_str) = before {
+        if let Ok(date) = parse_date_string(&before_str) {
+            date_range.end = Some(date);
+        } else {
+            eprintln!("⚠️  Warning: Could not parse 'before' date: {}", before_str);
+        }
+    }
+    if date_range.start.is_some() || date_range.end.is_some() {
+        search_query.date_range = Some(date_range);
+    }
+
+    // Apply other filters
+    search_query.min_messages = min_messages;
+    search_query.max_messages = max_messages;
+    search_query.min_duration_minutes = min_duration;
+    search_query.max_duration_minutes = max_duration;
+    search_query.max_results = Some(limit);
+
+    // Execute search
+    let results = search_engine.search(&search_query)?;
 
     if results.is_empty() {
-        println!("No conversations found matching: {}", query);
+        println!("❌ No conversations found matching the search criteria");
         return Ok(());
     }
 
@@ -256,31 +428,45 @@ fn execute_search(
     );
     println!();
 
-    for conv in results {
-        println!("📄 Session: {}", conv.session_id);
+    for result in results {
+        let conv = &result.conversation;
+        println!(
+            "📄 Session: {} (Score: {:.2})",
+            conv.session_id, result.relevance_score
+        );
         println!("   Project: {}", conv.project_path);
         if let Some(summary) = &conv.summary {
             println!("   Summary: {}", summary);
         }
+        println!(
+            "   Messages: {} | Matches: {}",
+            conv.messages.len(),
+            result.match_count
+        );
 
-        // Show matching messages
-        let query_lower = query.to_lowercase();
-        for msg in &conv.messages {
-            if msg.content.to_lowercase().contains(&query_lower) {
-                let role_str = match msg.role {
-                    ConvMessageRole::User => "User",
-                    ConvMessageRole::Assistant => "Assistant",
-                    ConvMessageRole::System => "System",
-                };
+        // Show highlighted matches
+        if !result.match_highlights.is_empty() {
+            println!("   🎯 Highlights:");
+            for highlight in result.match_highlights.iter().take(3) {
+                // Show up to 3 highlights
+                if let Some(message) = conv.messages.get(highlight.message_index) {
+                    let role_str = match message.role {
+                        ConvMessageRole::User => "User",
+                        ConvMessageRole::Assistant => "Assistant",
+                        ConvMessageRole::System => "System",
+                    };
 
-                println!("   Match in {} message:", role_str);
-                // Show a snippet of the matching content
-                let snippet = if msg.content.len() > 200 {
-                    format!("{}...", &msg.content[..200])
-                } else {
-                    msg.content.clone()
-                };
-                println!("   {}", snippet.replace('\n', " "));
+                    let start = highlight.start.saturating_sub(30);
+                    let end = (highlight.end + 30).min(message.content.len());
+                    let snippet = &message.content[start..end];
+
+                    println!(
+                        "      {} {}...{}",
+                        role_str,
+                        if start > 0 { "..." } else { "" },
+                        snippet.replace('\n', " ")
+                    );
+                }
             }
         }
         println!();
@@ -358,7 +544,7 @@ fn execute_stats(
 /// Display basic analytics summary
 fn display_basic_analytics(analytics: &crate::claude::ConversationAnalytics) {
     let stats = &analytics.basic_stats;
-    
+
     println!("📊 Conversation Analytics Summary");
     println!();
     println!("📈 Basic Statistics:");
@@ -368,8 +554,11 @@ fn display_basic_analytics(analytics: &crate::claude::ConversationAnalytics) {
     println!("   Assistant messages: {}", stats.total_assistant_messages);
     println!("   System messages: {}", stats.total_system_messages);
     println!("   Tool uses: {}", stats.total_tool_uses);
-    println!("   Avg. messages per conversation: {:.1}", stats.average_messages_per_conversation);
-    
+    println!(
+        "   Avg. messages per conversation: {:.1}",
+        stats.average_messages_per_conversation
+    );
+
     if let Some(date_range) = &stats.date_range.earliest {
         println!("   First conversation: {}", date_range.format("%Y-%m-%d"));
     }
@@ -382,23 +571,56 @@ fn display_basic_analytics(analytics: &crate::claude::ConversationAnalytics) {
 
     println!();
     println!("🏆 Top Models:");
-    for (i, model) in analytics.model_analytics.top_models.iter().take(5).enumerate() {
-        println!("   {}. {} - {} uses ({:.1}%)", 
-            i + 1, model.model_name, model.usage_count, model.percentage);
+    for (i, model) in analytics
+        .model_analytics
+        .top_models
+        .iter()
+        .take(5)
+        .enumerate()
+    {
+        println!(
+            "   {}. {} - {} uses ({:.1}%)",
+            i + 1,
+            model.model_name,
+            model.usage_count,
+            model.percentage
+        );
     }
 
     println!();
     println!("🛠️  Top Tools:");
-    for (i, tool) in analytics.tool_analytics.top_tools.iter().take(5).enumerate() {
-        println!("   {}. {} - {} uses ({:.1}%)", 
-            i + 1, tool.tool_name, tool.usage_count, tool.percentage);
+    for (i, tool) in analytics
+        .tool_analytics
+        .top_tools
+        .iter()
+        .take(5)
+        .enumerate()
+    {
+        println!(
+            "   {}. {} - {} uses ({:.1}%)",
+            i + 1,
+            tool.tool_name,
+            tool.usage_count,
+            tool.percentage
+        );
     }
 
     println!();
     println!("📁 Top Projects:");
-    for (i, project) in analytics.project_analytics.top_projects.iter().take(5).enumerate() {
-        println!("   {}. {} - {} conversations ({:.1}%)", 
-            i + 1, project.project_name, project.conversation_count, project.percentage);
+    for (i, project) in analytics
+        .project_analytics
+        .top_projects
+        .iter()
+        .take(5)
+        .enumerate()
+    {
+        println!(
+            "   {}. {} - {} conversations ({:.1}%)",
+            i + 1,
+            project.project_name,
+            project.conversation_count,
+            project.percentage
+        );
     }
 
     println!();
@@ -408,19 +630,29 @@ fn display_basic_analytics(analytics: &crate::claude::ConversationAnalytics) {
 /// Display detailed analytics dashboard
 fn display_detailed_analytics(analytics: &crate::claude::ConversationAnalytics) {
     display_basic_analytics(analytics);
-    
+
     println!();
     println!("🕒 Temporal Analysis:");
-    
+
     // Peak usage hours
     println!("   Peak usage hours:");
     for peak in &analytics.temporal_analysis.peak_usage_hours {
-        println!("     {}:00 - {} conversations ({:.1}%)", 
-            peak.hour, peak.count, peak.percentage);
+        println!(
+            "     {}:00 - {} conversations ({:.1}%)",
+            peak.hour, peak.count, peak.percentage
+        );
     }
-    
+
     // Weekday usage
-    let weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let weekdays = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
     println!("   Usage by day of week:");
     for (day_num, count) in &analytics.temporal_analysis.usage_by_weekday {
         if let Some(day_name) = weekdays.get(*day_num as usize) {
@@ -432,16 +664,25 @@ fn display_detailed_analytics(analytics: &crate::claude::ConversationAnalytics) 
     println!("📊 Quality Metrics:");
     let quality = &analytics.quality_metrics;
     if let Some(avg_duration) = quality.average_conversation_duration {
-        println!("   Average conversation duration: {:.1} minutes", avg_duration);
+        println!(
+            "   Average conversation duration: {:.1} minutes",
+            avg_duration
+        );
     }
-    println!("   Average turns per conversation: {:.1}", quality.average_turns_per_conversation);
+    println!(
+        "   Average turns per conversation: {:.1}",
+        quality.average_turns_per_conversation
+    );
     println!("   Completion rate: {:.1}%", quality.completion_rate);
-    
+
     let msg_dist = &quality.message_length_distribution;
     println!("   Message length stats:");
     println!("     Average: {:.0} characters", msg_dist.mean);
     println!("     Median: {} characters", msg_dist.median);
-    println!("     95th percentile: {} characters", msg_dist.percentile_95);
+    println!(
+        "     95th percentile: {} characters",
+        msg_dist.percentile_95
+    );
 
     println!();
     println!("📈 Conversation Length Distribution:");
@@ -455,12 +696,12 @@ fn display_detailed_analytics(analytics: &crate::claude::ConversationAnalytics) 
 
 /// Handle analytics export
 fn handle_export(
-    analytics: &crate::claude::ConversationAnalytics, 
-    format: ExportFormat, 
-    verbose: bool
+    analytics: &crate::claude::ConversationAnalytics,
+    format: ExportFormat,
+    verbose: bool,
 ) -> Result<()> {
     let timestamp = analytics.generated_at.format("%Y%m%d_%H%M%S");
-    
+
     match format {
         ExportFormat::Json => {
             let filename = format!("claude_analytics_{}.json", timestamp);
@@ -472,7 +713,7 @@ fn handle_export(
                 println!("   Format: JSON");
                 println!("   Size: {} bytes", data_size);
             }
-        },
+        }
         ExportFormat::Csv => {
             let filename = format!("claude_analytics_{}.csv", timestamp);
             let csv_data = generate_csv_export(analytics)?;
@@ -483,45 +724,77 @@ fn handle_export(
                 println!("   Format: CSV");
                 println!("   Rows: {}", row_count);
             }
-        },
+        }
     }
-    
+
     Ok(())
 }
 
 /// Generate CSV export of analytics data
 fn generate_csv_export(analytics: &crate::claude::ConversationAnalytics) -> Result<String> {
     let mut csv_content = String::new();
-    
+
     // Basic stats section
     csv_content.push_str("Section,Metric,Value\n");
-    csv_content.push_str(&format!("Basic,Total Conversations,{}\n", analytics.basic_stats.total_conversations));
-    csv_content.push_str(&format!("Basic,Total Messages,{}\n", analytics.basic_stats.total_messages));
-    csv_content.push_str(&format!("Basic,User Messages,{}\n", analytics.basic_stats.total_user_messages));
-    csv_content.push_str(&format!("Basic,Assistant Messages,{}\n", analytics.basic_stats.total_assistant_messages));
-    csv_content.push_str(&format!("Basic,System Messages,{}\n", analytics.basic_stats.total_system_messages));
-    csv_content.push_str(&format!("Basic,Tool Uses,{}\n", analytics.basic_stats.total_tool_uses));
-    csv_content.push_str(&format!("Basic,Avg Messages per Conversation,{:.2}\n", analytics.basic_stats.average_messages_per_conversation));
-    
+    csv_content.push_str(&format!(
+        "Basic,Total Conversations,{}\n",
+        analytics.basic_stats.total_conversations
+    ));
+    csv_content.push_str(&format!(
+        "Basic,Total Messages,{}\n",
+        analytics.basic_stats.total_messages
+    ));
+    csv_content.push_str(&format!(
+        "Basic,User Messages,{}\n",
+        analytics.basic_stats.total_user_messages
+    ));
+    csv_content.push_str(&format!(
+        "Basic,Assistant Messages,{}\n",
+        analytics.basic_stats.total_assistant_messages
+    ));
+    csv_content.push_str(&format!(
+        "Basic,System Messages,{}\n",
+        analytics.basic_stats.total_system_messages
+    ));
+    csv_content.push_str(&format!(
+        "Basic,Tool Uses,{}\n",
+        analytics.basic_stats.total_tool_uses
+    ));
+    csv_content.push_str(&format!(
+        "Basic,Avg Messages per Conversation,{:.2}\n",
+        analytics.basic_stats.average_messages_per_conversation
+    ));
+
     // Model usage
     csv_content.push_str("\nModel,Usage Count,Percentage\n");
     for model in &analytics.model_analytics.top_models {
-        csv_content.push_str(&format!("{},{},{:.2}\n", model.model_name, model.usage_count, model.percentage));
+        csv_content.push_str(&format!(
+            "{},{},{:.2}\n",
+            model.model_name, model.usage_count, model.percentage
+        ));
     }
-    
+
     // Tool usage
     csv_content.push_str("\nTool,Usage Count,Percentage\n");
     for tool in &analytics.tool_analytics.top_tools {
-        csv_content.push_str(&format!("{},{},{:.2}\n", tool.tool_name, tool.usage_count, tool.percentage));
+        csv_content.push_str(&format!(
+            "{},{},{:.2}\n",
+            tool.tool_name, tool.usage_count, tool.percentage
+        ));
     }
-    
+
     // Project usage
     csv_content.push_str("\nProject,Conversations,Messages,Percentage\n");
     for project in &analytics.project_analytics.top_projects {
-        csv_content.push_str(&format!("{},{},{},{:.2}\n", 
-            project.project_name, project.conversation_count, project.message_count, project.percentage));
+        csv_content.push_str(&format!(
+            "{},{},{},{:.2}\n",
+            project.project_name,
+            project.conversation_count,
+            project.message_count,
+            project.percentage
+        ));
     }
-    
+
     Ok(csv_content)
 }
 
@@ -551,7 +824,11 @@ fn execute_timeline(
     // Create timeline configuration
     let config = TimelineConfig {
         period: timeline_period,
-        summary_depth: if detailed { SummaryDepth::Detailed } else { SummaryDepth::Brief },
+        summary_depth: if detailed {
+            SummaryDepth::Detailed
+        } else {
+            SummaryDepth::Brief
+        },
         max_conversations_per_project: Some(max_conversations),
         include_empty_projects: include_empty,
     };
@@ -561,7 +838,10 @@ fn execute_timeline(
     let conversations = parser.parse_all_conversations()?;
 
     if verbose {
-        eprintln!("Found {} conversations, generating timeline...", conversations.len());
+        eprintln!(
+            "Found {} conversations, generating timeline...",
+            conversations.len()
+        );
     }
 
     let timeline = ActivityTimeline::create_filtered_timeline(conversations, config);
@@ -585,7 +865,10 @@ fn execute_timeline(
 /// Display timeline in human-readable format
 fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
     println!("📊 Activity Timeline - {}", timeline.config.period.label());
-    println!("   Generated: {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "   Generated: {}",
+        timeline.generated_at.format("%Y-%m-%d %H:%M:%S")
+    );
     println!();
 
     // Overall statistics
@@ -595,7 +878,7 @@ fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
     println!("   Total conversations: {}", stats.total_conversations);
     println!("   Total messages: {}", stats.total_messages);
     println!("   Messages per day: {:.1}", stats.messages_per_day);
-    
+
     if let Some(most_active) = &stats.most_active_project {
         println!("   Most active project: {}", most_active);
     }
@@ -614,15 +897,22 @@ fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
     for (i, project) in projects.iter().enumerate() {
         let rank = i + 1;
         println!("{}. 📁 {}", rank, project.project_path);
-        println!("   📊 {} conversations, {} messages", 
-                 project.stats.conversation_count, 
-                 project.stats.total_messages);
-        
+        println!(
+            "   📊 {} conversations, {} messages",
+            project.stats.conversation_count, project.stats.total_messages
+        );
+
         if detailed {
-            println!("   💬 Avg messages/conversation: {:.1}", project.stats.avg_conversation_length);
-            println!("   📅 Conversations/day: {:.1}", project.stats.conversation_frequency);
+            println!(
+                "   💬 Avg messages/conversation: {:.1}",
+                project.stats.avg_conversation_length
+            );
+            println!(
+                "   📅 Conversations/day: {:.1}",
+                project.stats.conversation_frequency
+            );
             println!("   📈 Messages/day: {:.1}", project.stats.message_frequency);
-            
+
             if let Some(peak_hour) = project.stats.peak_hour {
                 println!("   🕐 Peak hour: {}:00", peak_hour);
             }
@@ -630,19 +920,26 @@ fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
             // Show activity indicators using progress bar
             let progress_percentage = (project.indicators.progress_bar * 100.0) as u32;
             let bar_length = (project.indicators.progress_bar * 10.0) as usize;
-            println!("   📊 Activity: {} {}% ({} msgs)", 
-                     "█".repeat(bar_length),
-                     progress_percentage,
-                     project.stats.total_messages);
+            println!(
+                "   📊 Activity: {} {}% ({} msgs)",
+                "█".repeat(bar_length),
+                progress_percentage,
+                project.stats.total_messages
+            );
 
             // Show top tools if any
             if !project.stats.top_tools.is_empty() {
-                println!("   🛠️  Top tools: {}", 
-                         project.stats.top_tools.iter()
-                             .take(3)
-                             .map(|(name, count)| format!("{} ({})", name, count))
-                             .collect::<Vec<_>>()
-                             .join(", "));
+                println!(
+                    "   🛠️  Top tools: {}",
+                    project
+                        .stats
+                        .top_tools
+                        .iter()
+                        .take(3)
+                        .map(|(name, count)| format!("{} ({})", name, count))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
 
             // Show topical summary
@@ -650,7 +947,7 @@ fn display_timeline_human(timeline: &ActivityTimeline, detailed: bool) {
                 println!("   📝 Summary: {}", project.topical_summary.summary_text);
             }
         }
-        
+
         println!();
     }
 
@@ -675,7 +972,10 @@ fn display_timeline_json(timeline: &ActivityTimeline) -> Result<()> {
 fn display_timeline_markdown(timeline: &ActivityTimeline, detailed: bool) {
     println!("# Activity Timeline - {}", timeline.config.period.label());
     println!();
-    println!("**Generated:** {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "**Generated:** {}",
+        timeline.generated_at.format("%Y-%m-%d %H:%M:%S")
+    );
     println!();
 
     let stats = &timeline.total_stats;
@@ -685,7 +985,7 @@ fn display_timeline_markdown(timeline: &ActivityTimeline, detailed: bool) {
     println!("- **Total conversations:** {}", stats.total_conversations);
     println!("- **Total messages:** {}", stats.total_messages);
     println!("- **Messages per day:** {:.1}", stats.messages_per_day);
-    
+
     if let Some(most_active) = &stats.most_active_project {
         println!("- **Most active project:** {}", most_active);
     }
@@ -708,30 +1008,40 @@ fn display_timeline_markdown(timeline: &ActivityTimeline, detailed: bool) {
         println!();
         println!("- **Conversations:** {}", project.stats.conversation_count);
         println!("- **Messages:** {}", project.stats.total_messages);
-        
+
         if detailed {
-            println!("- **Avg messages/conversation:** {:.1}", project.stats.avg_conversation_length);
-            println!("- **Activity frequency:** {:.1} conversations/day, {:.1} messages/day", 
-                     project.stats.conversation_frequency, project.stats.message_frequency);
-            
+            println!(
+                "- **Avg messages/conversation:** {:.1}",
+                project.stats.avg_conversation_length
+            );
+            println!(
+                "- **Activity frequency:** {:.1} conversations/day, {:.1} messages/day",
+                project.stats.conversation_frequency, project.stats.message_frequency
+            );
+
             if let Some(peak_hour) = project.stats.peak_hour {
                 println!("- **Peak hour:** {}:00", peak_hour);
             }
 
             if !project.stats.top_tools.is_empty() {
-                println!("- **Top tools:** {}", 
-                         project.stats.top_tools.iter()
-                             .take(3)
-                             .map(|(name, count)| format!("{} ({})", name, count))
-                             .collect::<Vec<_>>()
-                             .join(", "));
+                println!(
+                    "- **Top tools:** {}",
+                    project
+                        .stats
+                        .top_tools
+                        .iter()
+                        .take(3)
+                        .map(|(name, count)| format!("{} ({})", name, count))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
 
             if !project.topical_summary.summary_text.is_empty() {
                 println!("- **Summary:** {}", project.topical_summary.summary_text);
             }
         }
-        
+
         println!();
     }
 }
@@ -739,7 +1049,10 @@ fn display_timeline_markdown(timeline: &ActivityTimeline, detailed: bool) {
 /// Display timeline in plain text format
 fn display_timeline_text(timeline: &ActivityTimeline, detailed: bool) {
     println!("Activity Timeline - {}", timeline.config.period.label());
-    println!("Generated: {}", timeline.generated_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Generated: {}",
+        timeline.generated_at.format("%Y-%m-%d %H:%M:%S")
+    );
     println!();
 
     let stats = &timeline.total_stats;
@@ -748,7 +1061,7 @@ fn display_timeline_text(timeline: &ActivityTimeline, detailed: bool) {
     println!("Total conversations: {}", stats.total_conversations);
     println!("Total messages: {}", stats.total_messages);
     println!("Messages per day: {:.1}", stats.messages_per_day);
-    
+
     if let Some(most_active) = &stats.most_active_project {
         println!("Most active project: {}", most_active);
     }
@@ -767,33 +1080,44 @@ fn display_timeline_text(timeline: &ActivityTimeline, detailed: bool) {
     for (i, project) in projects.iter().enumerate() {
         let rank = i + 1;
         println!("{}. {}", rank, project.project_path);
-        println!("   {} conversations, {} messages", 
-                 project.stats.conversation_count, 
-                 project.stats.total_messages);
-        
+        println!(
+            "   {} conversations, {} messages",
+            project.stats.conversation_count, project.stats.total_messages
+        );
+
         if detailed {
-            println!("   Avg messages/conversation: {:.1}", project.stats.avg_conversation_length);
-            println!("   Activity: {:.1} conversations/day, {:.1} messages/day", 
-                     project.stats.conversation_frequency, project.stats.message_frequency);
-            
+            println!(
+                "   Avg messages/conversation: {:.1}",
+                project.stats.avg_conversation_length
+            );
+            println!(
+                "   Activity: {:.1} conversations/day, {:.1} messages/day",
+                project.stats.conversation_frequency, project.stats.message_frequency
+            );
+
             if let Some(peak_hour) = project.stats.peak_hour {
                 println!("   Peak hour: {}:00", peak_hour);
             }
 
             if !project.stats.top_tools.is_empty() {
-                println!("   Top tools: {}", 
-                         project.stats.top_tools.iter()
-                             .take(3)
-                             .map(|(name, count)| format!("{} ({})", name, count))
-                             .collect::<Vec<_>>()
-                             .join(", "));
+                println!(
+                    "   Top tools: {}",
+                    project
+                        .stats
+                        .top_tools
+                        .iter()
+                        .take(3)
+                        .map(|(name, count)| format!("{} ({})", name, count))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
 
             if !project.topical_summary.summary_text.is_empty() {
                 println!("   Summary: {}", project.topical_summary.summary_text);
             }
         }
-        
+
         println!();
     }
 }
@@ -806,51 +1130,63 @@ fn handle_timeline_export(
     verbose: bool,
 ) -> Result<()> {
     let timestamp = timeline.generated_at.format("%Y%m%d_%H%M%S");
-    
+
     let (filename, data) = match export_format {
         ExportFormat::Json => {
             let filename = output.unwrap_or_else(|| format!("timeline_{}.json", timestamp));
             let data = serde_json::to_string_pretty(timeline)?;
             (filename, data)
-        },
+        }
         ExportFormat::Csv => {
             let filename = output.unwrap_or_else(|| format!("timeline_{}.csv", timestamp));
             let data = generate_timeline_csv_export(timeline)?;
             (filename, data)
-        },
+        }
     };
-    
+
     std::fs::write(&filename, &data)?;
-    
+
     println!("📄 Timeline exported to: {}", filename);
     if verbose {
         println!("   Format: {:?}", export_format);
         println!("   Size: {} bytes", data.len());
         println!("   Projects: {}", timeline.projects.len());
     }
-    
+
     Ok(())
 }
 
 /// Generate CSV export of timeline data
 fn generate_timeline_csv_export(timeline: &ActivityTimeline) -> Result<String> {
     let mut csv_content = String::new();
-    
+
     // Header
     csv_content.push_str("Project,Conversations,Messages,Avg_Messages_Per_Conv,Conv_Per_Day,Msg_Per_Day,Peak_Hour,Top_Tools,Summary\n");
-    
+
     // Data rows
     for project in timeline.projects_by_activity() {
-        let top_tools = project.stats.top_tools.iter()
+        let top_tools = project
+            .stats
+            .top_tools
+            .iter()
             .take(3)
             .map(|(name, count)| format!("{}({})", name, count))
             .collect::<Vec<_>>()
             .join(";");
-        
-        let summary = project.topical_summary.summary_text.replace(',', ";").replace('\n', " ");
-        let peak_hour = project.stats.peak_hour.map(|h| h.to_string()).unwrap_or_else(|| "".to_string());
-        
-        csv_content.push_str(&format!("{},{},{},{:.1},{:.1},{:.1},{},{},{}\n",
+
+        let summary = project
+            .topical_summary
+            .summary_text
+            .replace(',', ";")
+            .replace('\n', " ");
+        let peak_hour = project
+            .stats
+            .peak_hour
+            .map(|h| h.to_string())
+            .unwrap_or_else(|| "".to_string());
+
+        csv_content.push_str(&format!(
+            "{},{},{},{:.1},{:.1},{:.1},{},{},{}\n",
             project.project_path,
             project.stats.conversation_count,
             project.stats.total_messages,
@@ -862,7 +1198,7 @@ fn generate_timeline_csv_export(timeline: &ActivityTimeline) -> Result<String> {
             summary
         ));
     }
-    
+
     Ok(csv_content)
 }
 
@@ -955,11 +1291,15 @@ fn handle_conversation_export(
         None => {
             let extension = match export_format {
                 ConversationExportFormat::Markdown => "md",
-                ConversationExportFormat::Html => "html", 
+                ConversationExportFormat::Html => "html",
                 ConversationExportFormat::Pdf => "pdf",
                 ConversationExportFormat::Json => "json",
             };
-            PathBuf::from(format!("conversation_{}.{}", &conversation.session_id[..8], extension))
+            PathBuf::from(format!(
+                "conversation_{}.{}",
+                &conversation.session_id[..8],
+                extension
+            ))
         }
     };
 
@@ -1000,21 +1340,42 @@ fn handle_conversation_export(
 
 fn execute_mcp(action: McpAction, verbose: bool) -> Result<()> {
     match action {
-        McpAction::List { detailed, status, format, sort } => {
-            execute_mcp_list(detailed, status, format, sort, verbose)
-        }
-        McpAction::Discover { health_check, verbose: discover_verbose, paths } => {
-            execute_mcp_discover(health_check, discover_verbose || verbose, paths)
-        }
-        McpAction::Add { name, command, args, env, global, project } => {
-            crate::mcp::commands::execute_mcp_add(name, command, args, env, global, project, verbose)
-        }
-        McpAction::Remove { name, global, project } => {
-            crate::mcp::commands::execute_mcp_remove(name, global, project, verbose)
-        }
-        McpAction::Update { name, command, args, env, global, project } => {
-            crate::mcp::commands::execute_mcp_update(name, command, args, env, global, project, verbose)
-        }
+        McpAction::List {
+            detailed,
+            status,
+            format,
+            sort,
+        } => execute_mcp_list(detailed, status, format, sort, verbose),
+        McpAction::Discover {
+            health_check,
+            verbose: discover_verbose,
+            paths,
+        } => execute_mcp_discover(health_check, discover_verbose || verbose, paths),
+        McpAction::Add {
+            name,
+            command,
+            args,
+            env,
+            global,
+            project,
+        } => crate::mcp::commands::execute_mcp_add(
+            name, command, args, env, global, project, verbose,
+        ),
+        McpAction::Remove {
+            name,
+            global,
+            project,
+        } => crate::mcp::commands::execute_mcp_remove(name, global, project, verbose),
+        McpAction::Update {
+            name,
+            command,
+            args,
+            env,
+            global,
+            project,
+        } => crate::mcp::commands::execute_mcp_update(
+            name, command, args, env, global, project, verbose,
+        ),
     }
 }
 
@@ -1029,18 +1390,18 @@ fn execute_mcp_list(
     if verbose {
         eprintln!("Loading Claude Code MCP servers from ~/.claude.json...");
     }
-    
+
     match crate::mcp::commands::list_claude_servers(verbose) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Warning: Could not load Claude Code servers: {}", e);
         }
     }
-    
+
     println!();
     println!("{}", "─".repeat(60));
     println!();
-    
+
     // Then discover and show other MCP servers
     if verbose {
         eprintln!("Discovering other MCP servers...");
@@ -1099,21 +1460,30 @@ fn execute_mcp_discover(
     let discovery = if custom_paths.is_empty() {
         ServerDiscovery::new()
     } else {
-        let paths: Vec<std::path::PathBuf> = custom_paths.into_iter().map(std::path::PathBuf::from).collect();
+        let paths: Vec<std::path::PathBuf> = custom_paths
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect();
         ServerDiscovery::with_paths(paths)
-    }.with_health_checks(health_check);
+    }
+    .with_health_checks(health_check);
 
     // Perform discovery
     let result = discovery.discover_servers()?;
 
     // Display results
     println!("🔍 {}", result.summary());
-    
+
     if !result.servers.is_empty() {
         println!("\n📋 Discovered servers:");
         for server in &result.servers {
             let status_emoji = server.status.emoji();
-            println!("  {} {} - {}", status_emoji, server.name, server.transport.description());
+            println!(
+                "  {} {} - {}",
+                status_emoji,
+                server.name,
+                server.transport.description()
+            );
             if verbose {
                 println!("     ID: {}", server.id);
                 println!("     Config: {}", server.config_path.display());
@@ -1121,8 +1491,11 @@ fn execute_mcp_discover(
                     println!("     Version: {}", version);
                 }
                 if !server.capabilities.is_empty() {
-                    println!("     Capabilities: {}", 
-                        server.capabilities.iter()
+                    println!(
+                        "     Capabilities: {}",
+                        server
+                            .capabilities
+                            .iter()
                             .map(|c| c.description())
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -1150,16 +1523,23 @@ fn execute_mcp_discover(
     Ok(())
 }
 
-fn filter_servers_by_status(servers: Vec<McpServer>, filter: &ServerStatusFilter) -> Vec<McpServer> {
-    servers.into_iter().filter(|server| {
-        match filter {
+fn filter_servers_by_status(
+    servers: Vec<McpServer>,
+    filter: &ServerStatusFilter,
+) -> Vec<McpServer> {
+    servers
+        .into_iter()
+        .filter(|server| match filter {
             ServerStatusFilter::Running => matches!(server.status, ServerStatus::Running),
             ServerStatusFilter::Stopped => matches!(server.status, ServerStatus::Stopped),
             ServerStatusFilter::Error => matches!(server.status, ServerStatus::Error(_)),
             ServerStatusFilter::Unknown => matches!(server.status, ServerStatus::Unknown),
-            ServerStatusFilter::Transitional => matches!(server.status, ServerStatus::Starting | ServerStatus::Stopping),
-        }
-    }).collect()
+            ServerStatusFilter::Transitional => matches!(
+                server.status,
+                ServerStatus::Starting | ServerStatus::Stopping
+            ),
+        })
+        .collect()
 }
 
 fn sort_servers(servers: &mut [McpServer], sort: &ServerSortField) {
@@ -1200,7 +1580,7 @@ fn display_servers_human(servers: &[McpServer], detailed: bool) {
     for server in servers {
         let status_emoji = server.status.emoji();
         println!("📄 {} {}", status_emoji, server.name);
-        
+
         if detailed {
             for line in server.detailed_info() {
                 println!("   {}", line);
@@ -1214,7 +1594,7 @@ fn display_servers_human(servers: &[McpServer], detailed: bool) {
                 println!("   {}", description);
             }
         }
-        
+
         println!();
     }
 }
@@ -1228,7 +1608,7 @@ fn display_servers_json(servers: &[McpServer]) -> Result<()> {
 fn display_servers_markdown(servers: &[McpServer], detailed: bool) {
     println!("# MCP Servers");
     println!();
-    
+
     if servers.is_empty() {
         println!("No MCP servers found.");
         return;
@@ -1240,12 +1620,12 @@ fn display_servers_markdown(servers: &[McpServer], detailed: bool) {
     for server in servers {
         let status_emoji = server.status.emoji();
         println!("## {} {}", status_emoji, server.name);
-        
+
         if let Some(description) = &server.description {
             println!("{}", description);
             println!();
         }
-        
+
         if detailed {
             println!("**Details:**");
             for line in server.detailed_info() {
@@ -1257,7 +1637,99 @@ fn display_servers_markdown(servers: &[McpServer], detailed: bool) {
                 println!("- **Version:** {}", version);
             }
         }
-        
+
         println!();
     }
+}
+
+/// Parse natural language date strings into DateTime<Utc>
+fn parse_date_string(
+    date_str: &str,
+) -> std::result::Result<chrono::DateTime<chrono::Utc>, crate::errors::ClaudeToolsError> {
+    use chrono::{Duration, NaiveDate, TimeZone, Utc};
+
+    let date_str = date_str.trim().to_lowercase();
+
+    // Handle relative dates
+    if date_str.contains("ago") {
+        let parts: Vec<&str> = date_str.split_whitespace().collect();
+        if parts.len() >= 3 {
+            if let Ok(amount) = parts[0].parse::<i64>() {
+                let unit = parts[1];
+                let now = Utc::now();
+
+                let duration = match unit {
+                    "second" | "seconds" | "sec" | "s" => Duration::seconds(amount),
+                    "minute" | "minutes" | "min" | "m" => Duration::minutes(amount),
+                    "hour" | "hours" | "hr" | "h" => Duration::hours(amount),
+                    "day" | "days" | "d" => Duration::days(amount),
+                    "week" | "weeks" | "w" => Duration::weeks(amount),
+                    "month" | "months" => Duration::days(amount * 30), // Approximate
+                    "year" | "years" | "y" => Duration::days(amount * 365), // Approximate
+                    _ => {
+                        return Err(crate::errors::ClaudeToolsError::General(anyhow::anyhow!(
+                            "Unknown time unit: {}",
+                            unit
+                        )))
+                    }
+                };
+
+                return Ok(now - duration);
+            }
+        }
+    }
+
+    // Handle relative keywords
+    match date_str.as_str() {
+        "now" | "today" => return Ok(Utc::now()),
+        "yesterday" => return Ok(Utc::now() - Duration::days(1)),
+        "last week" | "1 week ago" => return Ok(Utc::now() - Duration::weeks(1)),
+        "last month" | "1 month ago" => return Ok(Utc::now() - Duration::days(30)),
+        "last year" | "1 year ago" => return Ok(Utc::now() - Duration::days(365)),
+        _ => {}
+    }
+
+    // Try ISO 8601 format (YYYY-MM-DD)
+    if let Ok(naive_date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+        if let Some(datetime) = naive_date.and_hms_opt(0, 0, 0) {
+            return Ok(Utc.from_utc_datetime(&datetime));
+        }
+    }
+
+    // Try date with time (YYYY-MM-DD HH:MM:SS)
+    if let Ok(naive_datetime) =
+        chrono::NaiveDateTime::parse_from_str(&date_str, "%Y-%m-%d %H:%M:%S")
+    {
+        return Ok(Utc.from_utc_datetime(&naive_datetime));
+    }
+
+    // Try other common formats
+    let formats = [
+        "%Y/%m/%d",
+        "%m/%d/%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+    ];
+
+    for format in &formats {
+        if format.contains("%H") {
+            if let Ok(naive_datetime) = chrono::NaiveDateTime::parse_from_str(&date_str, format) {
+                return Ok(Utc.from_utc_datetime(&naive_datetime));
+            }
+        } else {
+            if let Ok(naive_date) = NaiveDate::parse_from_str(&date_str, format) {
+                if let Some(datetime) = naive_date.and_hms_opt(0, 0, 0) {
+                    return Ok(Utc.from_utc_datetime(&datetime));
+                }
+            }
+        }
+    }
+
+    Err(crate::errors::ClaudeToolsError::General(anyhow::anyhow!(
+        "Could not parse date: {}",
+        date_str
+    )))
 }

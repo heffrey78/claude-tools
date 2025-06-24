@@ -142,7 +142,7 @@ pub struct ConversationMessage {
 }
 
 /// Role of the message sender
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
     Assistant,
