@@ -7,6 +7,7 @@ use crate::cli::args::{
     Commands, ConversationExportFormat, ExportFormat, McpAction, MessageRole, OutputFormat,
     ServerSortField, ServerStatusFilter, TimelinePeriod,
 };
+use crate::config::AppConfig;
 use crate::errors::Result;
 use crate::mcp::{McpServer, ServerDiscovery, ServerStatus};
 use crate::ui::{App, Event, EventHandler};
@@ -1258,6 +1259,23 @@ fn run_app<B: ratatui::backend::Backend>(
             }
             Ok(Event::Mouse(_)) => {
                 // Mouse events (not used for now)
+            }
+            Ok(Event::FileChanged(path)) => {
+                // Handle file system change events
+                app.handle_file_change(path);
+            }
+            Ok(Event::ConfigChanged) => {
+                // Configuration change events - reload config
+                match AppConfig::load_from_file(AppConfig::default_config_path().unwrap_or_default()) {
+                    Ok(config) => {
+                        if let Err(e) = app.update_config(config) {
+                            eprintln!("Failed to update config: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to reload config: {}", e);
+                    }
+                }
             }
             Err(_) => {
                 break;

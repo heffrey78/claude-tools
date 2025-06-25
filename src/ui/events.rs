@@ -1,4 +1,5 @@
 use crossterm::event::{self, Event as CrosstermEvent, KeyEvent, MouseEvent};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,6 +15,10 @@ pub enum Event {
     Resize(u16, u16),
     /// Tick event (for animations, periodic updates)
     Tick,
+    /// File system change event
+    FileChanged(PathBuf),
+    /// Configuration file change event
+    ConfigChanged,
 }
 
 /// Event handler for terminal events

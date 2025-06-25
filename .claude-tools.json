@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "realtime": {
+    "enabled": true,
+    "debounce_ms": 250,
+    "watch_conversations": true,
+    "watch_mcp_configs": true,
+    "refresh_interval_seconds": 15
+  },
+  "timeline": {
+    "default_period": "1week",
+    "summary_depth": "comprehensive",
+    "max_conversations": 50,
+    "enable_caching": true
+  },
+  "ui": {
+    "default_view": "Timeline",
+    "theme": "dark",
+    "show_status_messages": true,
+    "status_message_duration_ms": 2000
+  }
+}

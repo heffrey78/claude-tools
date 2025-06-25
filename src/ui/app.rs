@@ -4,9 +4,11 @@ use crate::claude::{
     HighlightType, MatchHighlight, MessageRole, RankingIndicator, SearchEngine, SearchMode, SearchQuery,
     SearchResult, SummaryDepth, TimePeriod, TimelineCache, TimelineConfig,
 };
+use crate::config::AppConfig;
 use crate::errors::ClaudeToolsError;
 use crate::mcp::{DiscoveryResult, McpServer, ServerDiscovery, ServerStatus};
 use crate::ui::conversation_display::ConversationRenderer;
+use crate::ui::{UpdateManager, UpdateScope};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -154,6 +156,12 @@ pub struct App {
     previous_state_before_timeline: Option<AppState>,
     /// Whether we're viewing conversations from timeline (should return to timeline on escape)
     viewing_timeline_conversations: bool,
+    /// Application configuration
+    app_config: AppConfig,
+    /// Update manager for real-time file changes
+    update_manager: UpdateManager,
+    /// Whether auto-refresh is currently active
+    auto_refresh_enabled: bool,
 }
 
 impl App {
@@ -182,6 +190,13 @@ impl App {
         // Initialize MCP server discovery
         let server_discovery = ServerDiscovery::new();
         let mcp_server_list_state = ListState::default();
+
+        // Load configuration hierarchically
+        let app_config = AppConfig::load_hierarchical(None, None)
+            .unwrap_or_else(|_| AppConfig::default());
+
+        // Initialize auto-refresh based on config
+        let auto_refresh_enabled = app_config.realtime.enabled;
 
         Ok(Self {
             state: AppState::ConversationList,
@@ -232,6 +247,9 @@ impl App {
             previous_state_before_search: None,
             previous_state_before_timeline: None,
             viewing_timeline_conversations: false,
+            app_config,
+            update_manager: UpdateManager::new(),
+            auto_refresh_enabled,
         })
     }
 
@@ -298,6 +316,9 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_conversations();
+            }
+            KeyCode::Char('R') => {
+                self.toggle_auto_refresh();
             }
             KeyCode::Char('a') => {
                 self.start_analytics();
@@ -1082,6 +1103,7 @@ impl App {
                     Line::from(""),
                     Line::from("🔧 Actions:"),
                     Line::from("  r          Refresh conversation list"),
+                    Line::from("  R          Toggle auto-refresh"),
                     Line::from("  a          Analytics dashboard"),
                     Line::from("  t          Activity timeline dashboard"),
                     Line::from("  m          MCP server dashboard"),
@@ -1104,6 +1126,28 @@ impl App {
                         ),
                     ]));
                 }
+
+                // Show auto-refresh status
+                help_text.push(Line::from(""));
+                let auto_refresh_status = if self.auto_refresh_enabled { "enabled" } else { "disabled" };
+                let auto_refresh_color = if self.auto_refresh_enabled { Color::Green } else { Color::Red };
+                help_text.push(Line::from(vec![
+                    Span::styled("⚡ ".to_string(), Style::default().fg(auto_refresh_color)),
+                    Span::styled(
+                        "Auto-refresh: ".to_string(),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(
+                        auto_refresh_status.to_string(),
+                        Style::default()
+                            .fg(auto_refresh_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" ({}ms debounce)", self.app_config.realtime.debounce_ms),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
             }
 
             AppState::ConversationDetail => {
@@ -1713,7 +1757,12 @@ impl App {
     /// Render status bar
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect) {
         let mut status_text = match self.state {
-            AppState::ConversationList => "Press ? for help, / to search, a for analytics, t for timeline, m for MCP servers, q to quit".to_string(),
+            AppState::ConversationList => {
+                let auto_refresh_indicator = if self.auto_refresh_enabled { "⚡" } else { "⚪" };
+                format!("{}Auto-refresh: {} • Press ? for help, / to search, R to toggle auto-refresh, q to quit", 
+                    auto_refresh_indicator, 
+                    if self.auto_refresh_enabled { "ON" } else { "OFF" })
+            },
             AppState::ConversationDetail => "Press q to go back, j/k to scroll, e to export, / or Ctrl+F to search".to_string(),
             AppState::Search => format!("Search: {}_", self.search_query),
             AppState::InConversationSearch => {
@@ -2041,6 +2090,199 @@ impl App {
         } else {
             self.status_message = Some("No cache available".to_string());
         }
+    }
+
+    /// Handle file system change events
+    pub fn handle_file_change(&mut self, path: std::path::PathBuf) {
+        if !self.auto_refresh_enabled {
+            return;
+        }
+
+        // Add the file change to the update manager
+        self.update_manager.add_file_change(path);
+
+        // Check if we should process updates now
+        if self.update_manager.should_process_updates() {
+            self.process_pending_updates();
+        }
+    }
+
+    /// Process pending file system updates based on scope
+    fn process_pending_updates(&mut self) {
+        if let Some(scope) = self.update_manager.get_update_scope() {
+            match scope {
+                UpdateScope::Minimal(path) => {
+                    self.handle_minimal_update(path);
+                }
+                UpdateScope::Incremental(paths) => {
+                    self.handle_incremental_update(paths);
+                }
+                UpdateScope::Full => {
+                    self.handle_full_refresh();
+                }
+            }
+        }
+    }
+
+    /// Handle minimal update for single file change
+    fn handle_minimal_update(&mut self, _path: std::path::PathBuf) {
+        // For now, perform a lightweight refresh
+        // TODO: Implement selective conversation update
+        self.refresh_conversations();
+        self.status_message = Some("Auto-refreshed (single file)".to_string());
+    }
+
+    /// Handle incremental update for multiple file changes
+    fn handle_incremental_update(&mut self, paths: Vec<std::path::PathBuf>) {
+        // Perform targeted refresh based on changed files
+        self.refresh_conversations();
+        
+        // Invalidate timeline cache if needed
+        if paths.iter().any(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl")) {
+            self.activity_timeline = None;
+        }
+
+        self.status_message = Some(format!("Auto-refreshed ({} files)", paths.len()));
+    }
+
+    /// Handle full refresh for major changes
+    fn handle_full_refresh(&mut self) {
+        // Perform comprehensive refresh
+        self.refresh_conversations();
+        self.activity_timeline = None;
+        self.analytics_data = None;
+        
+        self.status_message = Some("Auto-refreshed (full)".to_string());
+    }
+
+    /// Enable or disable auto-refresh
+    pub fn set_auto_refresh_enabled(&mut self, enabled: bool) {
+        self.auto_refresh_enabled = enabled;
+        if enabled {
+            self.status_message = Some("Auto-refresh enabled".to_string());
+        } else {
+            self.status_message = Some("Auto-refresh disabled".to_string());
+            self.update_manager.clear_pending();
+        }
+    }
+
+    /// Get auto-refresh status
+    pub fn is_auto_refresh_enabled(&self) -> bool {
+        self.auto_refresh_enabled
+    }
+
+    /// Update configuration and apply changes
+    pub fn update_config(&mut self, config: AppConfig) -> Result<(), ClaudeToolsError> {
+        // Validate configuration first
+        config.validate().map_err(|e| ClaudeToolsError::Config(e.to_string()))?;
+        
+        // Apply auto-refresh settings
+        let was_enabled = self.auto_refresh_enabled;
+        self.auto_refresh_enabled = config.realtime.enabled;
+        
+        // Save configuration
+        if let Ok(config_path) = AppConfig::default_config_path() {
+            if let Err(e) = config.save_to_file(&config_path) {
+                self.error_message = Some(format!("Failed to save config: {}", e));
+            }
+        }
+
+        self.app_config = config;
+
+        // Notify about auto-refresh status change
+        if was_enabled != self.auto_refresh_enabled {
+            if self.auto_refresh_enabled {
+                self.status_message = Some("Auto-refresh enabled via config".to_string());
+            } else {
+                self.status_message = Some("Auto-refresh disabled via config".to_string());
+                self.update_manager.clear_pending();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get current configuration
+    pub fn get_config(&self) -> &AppConfig {
+        &self.app_config
+    }
+
+    /// Toggle auto-refresh on/off with immediate effect
+    pub fn toggle_auto_refresh(&mut self) {
+        let new_state = !self.auto_refresh_enabled;
+        self.set_auto_refresh_enabled(new_state);
+        
+        // Update the configuration to persist the setting
+        self.app_config.realtime.enabled = new_state;
+        
+        // Save configuration if possible
+        if let Ok(config_path) = AppConfig::default_config_path() {
+            if let Err(e) = self.app_config.save_to_file(&config_path) {
+                self.error_message = Some(format!("Failed to save auto-refresh setting: {}", e));
+            }
+        }
+        
+        // Clear pending updates when disabling
+        if !new_state {
+            self.update_manager.clear_pending();
+        }
+        
+        // Show status message
+        let status = if new_state { "enabled" } else { "disabled" };
+        self.status_message = Some(format!("Auto-refresh {}", status));
+    }
+
+    /// Adjust debounce duration (cycle through common values)
+    pub fn cycle_debounce_duration(&mut self) {
+        let current = self.app_config.realtime.debounce_ms;
+        let new_duration = match current {
+            100..=199 => 250,
+            200..=299 => 500,
+            300..=599 => 1000,
+            600..=1499 => 2000,
+            _ => 100, // Reset to minimum
+        };
+        
+        self.app_config.realtime.debounce_ms = new_duration;
+        
+        // Save configuration if possible
+        if let Ok(config_path) = AppConfig::default_config_path() {
+            if let Err(e) = self.app_config.save_to_file(&config_path) {
+                self.error_message = Some(format!("Failed to save debounce setting: {}", e));
+            }
+        }
+        
+        self.status_message = Some(format!("Debounce set to {}ms", new_duration));
+    }
+
+    /// Toggle conversation file watching
+    pub fn toggle_conversation_watching(&mut self) {
+        self.app_config.realtime.watch_conversations = !self.app_config.realtime.watch_conversations;
+        
+        // Save configuration if possible
+        if let Ok(config_path) = AppConfig::default_config_path() {
+            if let Err(e) = self.app_config.save_to_file(&config_path) {
+                self.error_message = Some(format!("Failed to save watch setting: {}", e));
+            }
+        }
+        
+        let status = if self.app_config.realtime.watch_conversations { "enabled" } else { "disabled" };
+        self.status_message = Some(format!("Conversation watching {}", status));
+    }
+
+    /// Toggle MCP config file watching
+    pub fn toggle_mcp_watching(&mut self) {
+        self.app_config.realtime.watch_mcp_configs = !self.app_config.realtime.watch_mcp_configs;
+        
+        // Save configuration if possible
+        if let Ok(config_path) = AppConfig::default_config_path() {
+            if let Err(e) = self.app_config.save_to_file(&config_path) {
+                self.error_message = Some(format!("Failed to save MCP watch setting: {}", e));
+            }
+        }
+        
+        let status = if self.app_config.realtime.watch_mcp_configs { "enabled" } else { "disabled" };
+        self.status_message = Some(format!("MCP config watching {}", status));
     }
 
     /// Toggle project expansion in timeline
@@ -3321,4 +3563,93 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::ClaudeDirectory;
+    use tempfile::TempDir;
+    use std::fs;
+
+    fn create_test_app() -> App {
+        let temp_dir = TempDir::new().unwrap();
+        let conversations_dir = temp_dir.path().join("conversations");
+        fs::create_dir_all(&conversations_dir).unwrap();
+        
+        let claude_dir = ClaudeDirectory {
+            path: temp_dir.path().to_path_buf(),
+        };
+        
+        App::new(claude_dir).unwrap()
+    }
+
+    #[test]
+    fn test_auto_refresh_toggle() {
+        let mut app = create_test_app();
+        let initial_state = app.is_auto_refresh_enabled();
+        
+        app.toggle_auto_refresh();
+        assert_eq!(app.is_auto_refresh_enabled(), !initial_state);
+        
+        app.toggle_auto_refresh();
+        assert_eq!(app.is_auto_refresh_enabled(), initial_state);
+    }
+
+    #[test]
+    fn test_set_auto_refresh_enabled() {
+        let mut app = create_test_app();
+        
+        app.set_auto_refresh_enabled(true);
+        assert!(app.is_auto_refresh_enabled());
+        
+        app.set_auto_refresh_enabled(false);
+        assert!(!app.is_auto_refresh_enabled());
+    }
+
+    #[test]
+    fn test_cycle_debounce_duration() {
+        let mut app = create_test_app();
+        
+        // Set initial debounce
+        app.app_config.realtime.debounce_ms = 100;
+        app.cycle_debounce_duration();
+        assert_eq!(app.app_config.realtime.debounce_ms, 250);
+        
+        app.cycle_debounce_duration();
+        assert_eq!(app.app_config.realtime.debounce_ms, 500);
+        
+        app.cycle_debounce_duration();
+        assert_eq!(app.app_config.realtime.debounce_ms, 1000);
+        
+        app.cycle_debounce_duration();
+        assert_eq!(app.app_config.realtime.debounce_ms, 2000);
+        
+        app.cycle_debounce_duration();
+        assert_eq!(app.app_config.realtime.debounce_ms, 100); // Cycles back to start
+    }
+
+    #[test]
+    fn test_toggle_conversation_watching() {
+        let mut app = create_test_app();
+        let initial_state = app.app_config.realtime.watch_conversations;
+        
+        app.toggle_conversation_watching();
+        assert_eq!(app.app_config.realtime.watch_conversations, !initial_state);
+        
+        app.toggle_conversation_watching();
+        assert_eq!(app.app_config.realtime.watch_conversations, initial_state);
+    }
+
+    #[test]
+    fn test_toggle_mcp_watching() {
+        let mut app = create_test_app();
+        let initial_state = app.app_config.realtime.watch_mcp_configs;
+        
+        app.toggle_mcp_watching();
+        assert_eq!(app.app_config.realtime.watch_mcp_configs, !initial_state);
+        
+        app.toggle_mcp_watching();
+        assert_eq!(app.app_config.realtime.watch_mcp_configs, initial_state);
+    }
 }
