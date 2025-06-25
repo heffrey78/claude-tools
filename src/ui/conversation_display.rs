@@ -136,6 +136,12 @@ impl ConversationRenderer {
         content: &str,
         highlights: &[MatchHighlight],
     ) -> Vec<Line<'_>> {
+        // Simple approach: if there are highlights, render without markdown parsing
+        // and apply highlights directly to the raw content
+        if !highlights.is_empty() {
+            return self.render_plain_text_with_highlights(content, highlights);
+        }
+        
         let parser = Parser::new(content);
         let mut lines = Vec::new();
         let mut current_line = Vec::new();
@@ -261,7 +267,7 @@ impl ConversationRenderer {
                                 style = style.add_modifier(Modifier::ITALIC);
                             }
 
-                            // Apply search highlights
+                            // Apply search highlights - but only to the actual content, not duplicating it
                             let highlighted_spans =
                                 self.apply_text_highlights(&line_text, highlights, style);
                             current_line.extend(highlighted_spans);
@@ -402,6 +408,55 @@ impl ConversationRenderer {
             .collect()
     }
 
+    /// Render plain text content with highlights (bypassing markdown parsing)
+    fn render_plain_text_with_highlights(
+        &self,
+        content: &str,
+        highlights: &[MatchHighlight],
+    ) -> Vec<Line<'_>> {
+        let wrapped_text = self.wrap_text(content);
+        let mut lines = Vec::new();
+        let mut content_offset = 0;
+        
+        for line_text in wrapped_text {
+            let line_end = content_offset + line_text.len();
+            
+            // Find highlights that overlap with this line
+            let line_highlights: Vec<MatchHighlight> = highlights
+                .iter()
+                .filter_map(|highlight| {
+                    // Check if this highlight overlaps with the current line
+                    if highlight.start < line_end && highlight.end > content_offset {
+                        let line_start = highlight.start.saturating_sub(content_offset);
+                        let line_end_pos = (highlight.end - content_offset).min(line_text.len());
+                        
+                        if line_start < line_text.len() && line_end_pos > line_start {
+                            Some(MatchHighlight {
+                                message_index: highlight.message_index,
+                                start: line_start,
+                                end: line_end_pos,
+                                matched_text: highlight.matched_text.clone(),
+                                highlight_type: highlight.highlight_type.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let base_style = Style::default().fg(Color::White);
+            let highlighted_spans = self.apply_text_highlights(&line_text, &line_highlights, base_style);
+            lines.push(Line::from(highlighted_spans));
+            
+            content_offset += line_text.len();
+        }
+        
+        lines
+    }
+
     /// Apply search highlights to text spans
     fn apply_text_highlights(
         &self,
@@ -415,22 +470,49 @@ impl ConversationRenderer {
 
         let mut spans = Vec::new();
         let mut last_end = 0;
-        let text_lower = text.to_lowercase();
 
-        // Find highlights that apply to this text
+        // Use exact positions from highlights instead of re-searching
+        // This prevents duplicate highlighting when multiple MatchHighlight objects
+        // refer to the same search term
         let mut text_highlights = Vec::new();
+        let mut processed_positions = std::collections::HashSet::new();
+        
         for highlight in highlights {
-            if let Some(start) = text_lower.find(&highlight.matched_text.to_lowercase()) {
-                let end = start + highlight.matched_text.len();
+            let start = highlight.start;
+            let end = highlight.end;
+            
+            // Only add if this exact position hasn't been processed yet
+            // This prevents duplicate highlights for the same position
+            if !processed_positions.contains(&start) && start < text.len() && end <= text.len() {
                 text_highlights.push((start, end, &highlight.matched_text, &highlight.highlight_type));
+                processed_positions.insert(start);
             }
         }
 
         // Sort highlights by position
         text_highlights.sort_by_key(|(start, _, _, _)| *start);
 
+        // Merge overlapping highlights
+        let mut merged_highlights = Vec::new();
+        for (start, end, matched_text, highlight_type) in text_highlights {
+            if let Some((_last_start, last_end, _, last_type)) = merged_highlights.last_mut() {
+                if start <= *last_end {
+                    // Overlapping highlights - merge them
+                    *last_end = end.max(*last_end);
+                    // Keep the more specific highlight type (InConversationSearch over GlobalSearch)
+                    if *highlight_type == HighlightType::InConversationSearch {
+                        *last_type = highlight_type;
+                    }
+                } else {
+                    merged_highlights.push((start, end, matched_text, highlight_type));
+                }
+            } else {
+                merged_highlights.push((start, end, matched_text, highlight_type));
+            }
+        }
+
         // Build spans with highlights
-        for (start, end, _, highlight_type) in text_highlights {
+        for (start, end, _, highlight_type) in merged_highlights {
             // Add text before highlight
             if start > last_end {
                 spans.push(Span::styled(text[last_end..start].to_owned(), base_style));
@@ -510,5 +592,120 @@ mod tests {
         let mut renderer = ConversationRenderer::new(80);
         renderer.update_width(120);
         assert_eq!(renderer.terminal_width, 116); // 120 - 4 for borders
+    }
+
+    #[test]
+    fn test_progressive_search_highlighting() {
+        let renderer = ConversationRenderer::new(80);
+        let content = "init is analyzing your codebasecodebasecodebase";
+        
+        // Simulate the exact bug scenario: multiple matches for "codebase"
+        let highlights = vec![
+            MatchHighlight {
+                message_index: 0,
+                start: 26, // Position of first "codebase" in the text
+                end: 34,
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+            MatchHighlight {
+                message_index: 0,
+                start: 34, // Position of second "codebase"
+                end: 42,
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+            MatchHighlight {
+                message_index: 0,
+                start: 42, // Position of third "codebase"
+                end: 50,
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+        ];
+
+        let base_style = Style::default();
+        let spans = renderer.apply_text_highlights(content, &highlights, base_style);
+        
+        // Reconstruct the full text from spans
+        let reconstructed_text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        
+        // The bug would cause "codebase" to appear multiple times
+        // This test ensures the text is reconstructed correctly
+        assert_eq!(reconstructed_text, content);
+        
+        // The most important check: verify no span contains repeated text like "codebasecodebase"
+        for span in &spans {
+            assert!(!span.content.contains("codebasecodebase"), 
+                "Span should not contain duplicated text: {}", span.content);
+        }
+        
+        // Additional check: the text should contain exactly 3 occurrences of "codebase"
+        let codebase_count = reconstructed_text.matches("codebase").count();
+        assert_eq!(codebase_count, 3, "Should have exactly 3 occurrences of 'codebase'");
+    }
+
+    #[test]
+    fn test_duplicate_highlights_fix() {
+        use crate::claude::search::{MatchHighlight, HighlightType};
+        use ratatui::style::Style;
+        
+        let renderer = ConversationRenderer::new(80);
+        
+        // Test text with repeated words that was causing the bug
+        let text = "The codebase contains many files, and the codebase is well organized. This codebase is great.";
+        
+        // Create multiple highlights for the same word (simulating the bug scenario)
+        let highlights = vec![
+            MatchHighlight {
+                message_index: 0,
+                start: 4,  // First "codebase" - but these positions are relative to the entire message
+                end: 12,   // The function will find occurrences in the text line
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+            MatchHighlight {
+                message_index: 0,
+                start: 43, // Second "codebase"
+                end: 51,
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+            MatchHighlight {
+                message_index: 0,
+                start: 77, // Third "codebase"
+                end: 85,
+                matched_text: "codebase".to_string(),
+                highlight_type: HighlightType::InConversationSearch,
+            },
+        ];
+        
+        // Apply highlights
+        let spans = renderer.apply_text_highlights(text, &highlights, Style::default());
+        
+        // Reconstruct the text from spans
+        let reconstructed_text = spans.iter()
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        
+        // Verify the text is properly reconstructed (no duplication)
+        assert_eq!(reconstructed_text, text, "Text should be reconstructed without duplication");
+        
+        // Count the number of highlighted spans (should be reasonable, not excessive)
+        let highlight_spans = spans.iter()
+            .filter(|span| span.style.bg.is_some())
+            .count();
+        
+        // Should have exactly 3 highlighted spans (one for each unique occurrence)
+        assert_eq!(highlight_spans, 3, "Should have exactly 3 highlighted spans for 3 occurrences");
+        
+        // Verify no individual span contains repeated text
+        for span in spans.iter() {
+            if span.content.contains("codebase") {
+                let codebase_count = span.content.matches("codebase").count();
+                assert_eq!(codebase_count, 1, "Each span should contain 'codebase' at most once, found {} times in '{}'", codebase_count, span.content);
+            }
+        }
     }
 }

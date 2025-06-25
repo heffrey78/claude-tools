@@ -161,3 +161,12 @@ claude-tools mcp discover --health-check        # Rediscover servers
 - **Regular Expressions**: Full regex pattern matching with syntax validation
 - **Relevance Scoring**: TF-IDF based ranking with recency and message length boosting
 - **Result Highlighting**: Visual highlighting of matched terms in conversation snippets
+
+## Recent Bug Fixes
+
+### In-Conversation Search Highlighting (Fixed)
+- **Issue**: Search highlighting caused text duplication (e.g., "codebase" became "codebasecodebasecodebase")
+- **Root Cause**: Position mismatch between absolute search positions and markdown-parsed text fragments
+- **Solution**: Implemented dual-path rendering - plain text with highlights when searching, full markdown when not
+- **Files Modified**: `src/ui/conversation_display.rs`
+- **Test Coverage**: Added `test_progressive_search_highlighting` to prevent regression
